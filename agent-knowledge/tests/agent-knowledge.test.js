@@ -1,0 +1,245 @@
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtemp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+
+import {
+  addRule,
+  extractKeywords,
+  recordFix,
+  searchKnowledge,
+} from '../bin/agent-knowledge.js';
+
+const execFileAsync = promisify(execFile);
+const testDir = path.dirname(fileURLToPath(import.meta.url));
+const cliPath = path.resolve(testDir, '..', 'bin', 'agent-knowledge.js');
+const repoRoot = path.resolve(testDir, '..', '..');
+
+async function createTempRoot() {
+  return mkdtemp(path.join(tmpdir(), 'agent-knowledge-test-'));
+}
+
+async function writeKnowledgeFile(rootDir, relativePath, content) {
+  const filePath = path.join(rootDir, 'agent-knowledge', relativePath);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, content, 'utf8');
+  return filePath;
+}
+
+async function listMarkdownFiles(dir) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+    .map((entry) => path.join(dir, entry.name));
+}
+
+async function readOnlyMarkdownFile(dir) {
+  const files = await listMarkdownFiles(dir);
+  assert.equal(files.length, 1);
+  return {
+    filePath: files[0],
+    content: await readFile(files[0], 'utf8'),
+  };
+}
+
+async function assertNoBom(filePath) {
+  const bytes = await readFile(filePath);
+  assert.notDeepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+}
+
+async function runCli(args, options = {}) {
+  return execFileAsync(process.execPath, [cliPath, ...args], {
+    encoding: 'utf8',
+    ...options,
+  });
+}
+
+async function runCliFailure(args, options = {}) {
+  try {
+    await runCli(args, options);
+  } catch (error) {
+    return error;
+  }
+
+  assert.fail(`Expected CLI to fail for args: ${args.join(' ')}`);
+}
+
+function resultPath(result) {
+  if (typeof result === 'string') {
+    return result;
+  }
+
+  return result.path ?? result.filePath ?? result.file;
+}
+
+test('extractKeywords extracts mixed Chinese, symbol, and Java identifier keywords', () => {
+  const keywords = extractKeywords('修复 queryEntityGraph 实体图谱 ownerId 为空的问题，涉及 EntityGraphService.java');
+
+  for (const expected of [
+    'queryEntityGraph',
+    '实体图谱',
+    'ownerId',
+    'EntityGraphService',
+    'Entity',
+    'Graph',
+    'Service',
+  ]) {
+    assert.ok(keywords.includes(expected), `missing keyword: ${expected}`);
+  }
+});
+
+test('extractKeywords keeps first occurrence order across Chinese and identifiers', () => {
+  assert.deepEqual(extractKeywords('foo 中文 bar fooBaz'), [
+    'foo',
+    '中文',
+    'bar',
+    'fooBaz',
+    'Baz',
+  ]);
+});
+
+test('searchKnowledge ranks tag frontmatter matches before body matches and excludes unrelated files', async () => {
+  const rootDir = await createTempRoot();
+
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/tag-hit.md',
+    [
+      '---',
+      'title: 聚合数据源规则',
+      'tags: [aggregation, datasource]',
+      'status: confirmed',
+      '---',
+      '',
+      '这里没有正文关键词。',
+      '',
+    ].join('\n'),
+  );
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/body-hit.md',
+    [
+      '---',
+      'title: 正文命中规则',
+      'tags: [owner]',
+      'status: confirmed',
+      '---',
+      '',
+      'aggregation datasource 出现在正文中。',
+      '',
+    ].join('\n'),
+  );
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/unrelated.md',
+    [
+      '---',
+      'title: 无关规则',
+      'tags: [owner]',
+      'status: confirmed',
+      '---',
+      '',
+      '这个文件不包含搜索词。',
+      '',
+    ].join('\n'),
+  );
+
+  const results = await searchKnowledge({ rootDir, query: 'aggregation datasource' });
+  const resultNames = results.map((result) => path.basename(resultPath(result)));
+
+  assert.deepEqual(resultNames, ['tag-hit.md', 'body-hit.md']);
+});
+
+test('CLI search resolves repository root from script path when cwd is outside repository', async () => {
+  const cwd = await createTempRoot();
+
+  const { stdout } = await runCli(['search', 'aggregation datasource'], { cwd });
+
+  const expectedPath = 'agent-knowledge/knowledge/rules/aggregation-data-source-consistency.md';
+  assert.match(stdout, new RegExp(expectedPath.replaceAll('/', '\\/')));
+  await readFile(path.join(repoRoot, ...expectedPath.split('/')), 'utf8');
+  assert.doesNotMatch(stdout, /命中文件：\r?\n- 无/);
+});
+
+test('CLI unknown command returns non-zero and readable error', async () => {
+  const error = await runCliFailure(['unknown-command'], {
+    cwd: await createTempRoot(),
+  });
+
+  assert.notEqual(error.code, 0);
+  assert.match(`${error.stderr}${error.stdout}`, /未知命令/);
+});
+
+test('CLI add-rule without title returns non-zero before writing', async () => {
+  const error = await runCliFailure(['add-rule'], {
+    cwd: await createTempRoot(),
+  });
+
+  assert.notEqual(error.code, 0);
+  assert.match(`${error.stderr}${error.stdout}`, /title|标题/i);
+});
+
+test('CLI record-fix rejects missing or invalid type', async () => {
+  const missingType = await runCliFailure(['record-fix', '--type'], {
+    cwd: await createTempRoot(),
+  });
+  const invalidType = await runCliFailure(['record-fix', '--type', 'other', '--title', '无效类型'], {
+    cwd: await createTempRoot(),
+  });
+
+  assert.notEqual(missingType.code, 0);
+  assert.match(`${missingType.stderr}${missingType.stdout}`, /bug\|prd\|tech/);
+  assert.notEqual(invalidType.code, 0);
+  assert.match(`${invalidType.stderr}${invalidType.stdout}`, /bug\|prd\|tech/);
+});
+
+test('addRule writes rules to inbox with draft status by default', async () => {
+  const rootDir = await createTempRoot();
+
+  await addRule({
+    rootDir,
+    title: '聚合接口数据源一致性',
+  });
+
+  const ruleDir = path.join(rootDir, 'agent-knowledge', 'inbox', 'rules');
+  const { filePath, content } = await readOnlyMarkdownFile(ruleDir);
+
+  assert.match(content, /^status: draft$/m);
+  await assertNoBom(filePath);
+});
+
+test('addRule writes confirmed rules to knowledge with confirmed status', async () => {
+  const rootDir = await createTempRoot();
+
+  await addRule({
+    rootDir,
+    title: '已确认规则',
+    confirmed: true,
+  });
+
+  const ruleDir = path.join(rootDir, 'agent-knowledge', 'knowledge', 'rules');
+  const { filePath, content } = await readOnlyMarkdownFile(ruleDir);
+
+  assert.match(content, /^status: confirmed$/m);
+  await assertNoBom(filePath);
+});
+
+test('recordFix writes PRD corrections to inbox and includes evidence chain template', async () => {
+  const rootDir = await createTempRoot();
+
+  await recordFix({
+    rootDir,
+    type: 'prd',
+    title: 'PRD 字段含义纠偏',
+  });
+
+  const correctionDir = path.join(rootDir, 'agent-knowledge', 'inbox', 'prd-corrections');
+  const { filePath, content } = await readOnlyMarkdownFile(correctionDir);
+
+  assert.match(content, /证据链/);
+  await assertNoBom(filePath);
+});
