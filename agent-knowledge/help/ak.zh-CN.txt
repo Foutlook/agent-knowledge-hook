@@ -1,0 +1,336 @@
+# ak 短命令帮助
+
+`ak` 是 `agent-knowledge` 的 PowerShell 短命令包装器，用来把很长的底层命令收起来。
+
+知识库位置解析顺序：
+
+1. 优先使用环境变量 `AGENT_KNOWLEDGE_ROOT`
+2. 如果没有环境变量，自动寻找同级目录 `team-agent-knowledge`
+3. 如果仍找不到，使用工具内置示例知识库
+
+常用查看方式：
+
+```powershell
+ak help
+ak help check
+ak help refresh
+ak check --help
+```
+
+命令总览：
+
+| 命令 | 作用 | 是否写文件 |
+| --- | --- | --- |
+| `ak task <任务描述>` | 任务开始前检索相关知识 | 否 |
+| `ak search <关键词>` | 主动搜索知识库 | 否 |
+| `ak projects` | 列出知识库项目索引中的项目 | 否 |
+| `ak check <项目名>` | 检查项目知识文件是否落后于项目当前 HEAD | 否 |
+| `ak refresh <项目名> [说明]` | 刷新项目知识文件的元数据和刷新记录 | 是 |
+| `ak bug <标题>` | 记录 BUG 纠错到 inbox | 是 |
+| `ak prd <标题>` | 记录 PRD 纠偏到 inbox | 是 |
+| `ak tech <标题>` | 记录技术方案纠偏到 inbox | 是 |
+| `ak rule <规则标题> [--confirmed]` | 新增规则草稿或确认规则 | 是 |
+| `ak raw <原始参数>` | 透传到底层 `agent-knowledge` CLI | 取决于原始命令 |
+
+## task
+
+用法：
+
+```powershell
+ak task "分析实体图谱 ownerId 为空"
+```
+
+作用：
+
+任务开始前根据任务描述检索团队知识库，输出“必须阅读项”和“可能相关项”。
+
+什么时候用：
+
+- 开始分析需求、BUG、技术方案或代码评审前
+- 不确定某个问题是否有历史坑或团队规则时
+- Codex / Claude / OpenCode 进入正式分析前
+
+是否写文件：
+
+否。只读取知识库，不修改任何文件。
+
+底层动作：
+
+```text
+agent-knowledge before-task <任务描述>
+```
+
+## search
+
+用法：
+
+```powershell
+ak search "聚合接口 数据源一致"
+```
+
+作用：
+
+按关键词搜索知识库，返回命中的规则、项目说明、服务关系、历史坑或纠错记录。
+
+什么时候用：
+
+- 临时查某个规则是否已经沉淀
+- 想找某个服务、接口、模块、字段或业务口径的说明
+- 不在完整任务流程中，只想快速查知识
+
+是否写文件：
+
+否。只读取知识库，不修改任何文件。
+
+底层动作：
+
+```text
+agent-knowledge search <关键词>
+```
+
+## projects
+
+用法：
+
+```powershell
+ak projects
+```
+
+作用：
+
+读取 `knowledge/service-map/workspace-projects.md`，列出当前知识库已登记的项目名和本地路径。
+
+什么时候用：
+
+- 不记得项目名该写 `poseidon`、`reasearch-hub` 还是别的名字
+- 新增仓库前，确认它是否已经登记
+- 让 Codex 根据项目索引选择正确入口
+
+是否写文件：
+
+否。只读取项目索引。
+
+## check
+
+用法：
+
+```powershell
+ak check poseidon
+```
+
+作用：
+
+检查某个项目知识文件是否落后于该项目当前 Git HEAD。
+
+它会自动解析：
+
+- 项目路径：来自项目知识文件 `project_root`，或项目索引 `workspace-projects.md`
+- 知识文件：默认匹配 `knowledge/domain/project-<项目名>.md`
+
+什么时候用：
+
+- 开始处理某个项目相关需求前
+- 项目刚合并 master / main 后
+- 怀疑知识库里的项目说明已经落后于代码
+- 新增模块、接口、Facade、Mapper、前端入口、依赖关系后
+
+是否写文件：
+
+否。只对比 `last_scanned_commit` 和当前项目 HEAD。
+
+输出怎么看：
+
+- “已是最新”：知识文件记录的 commit 与项目当前 HEAD 一致
+- “可能过期”：项目代码已经变化，需要人工或 Codex 核对正文
+- “缺少 last_scanned_commit”：该项目知识还没有建立刷新基线
+
+底层动作：
+
+```text
+agent-knowledge check-stale --project-root <项目路径> --knowledge-file <知识文件>
+```
+
+## refresh
+
+用法：
+
+```powershell
+ak refresh poseidon "同步本次需求合并后的模块变化"
+```
+
+作用：
+
+在项目知识正文已经由人工或 Codex 核对后，刷新该知识文件的元数据。
+
+它会更新：
+
+- `updated`
+- `project_root`
+- `last_scanned_commit`
+- 正文末尾的“刷新记录”
+
+什么时候用：
+
+- 已经根据最新代码更新完项目知识正文
+- 确认项目说明已经覆盖本次合并后的变化
+- 新增仓库完成初始项目知识文件后
+
+是否写文件：
+
+是。会修改指定项目知识文件。
+
+重要边界：
+
+`ak refresh` 不会自动重写项目说明正文。它只表示“这份知识已经核对到当前 commit”。如果正文没有更新，不能只靠 refresh 假装知识已经最新。
+
+底层动作：
+
+```text
+agent-knowledge refresh-project --project-root <项目路径> --knowledge-file <知识文件> --summary <说明>
+```
+
+## bug
+
+用法：
+
+```powershell
+ak bug "学习报告统计口径错误"
+```
+
+作用：
+
+创建一条 BUG 修复纠错记录模板，写入 `inbox/fixes/`。
+
+什么时候用：
+
+- BUG 分析过程中被纠正
+- 最终修复原因和一开始判断不一致
+- 发现某个历史坑会反复导致同类 BUG
+- 修复后需要把失败点、调用链、原因、修复和验证方式沉淀下来
+
+是否写文件：
+
+是。写入 `inbox/fixes/`。
+
+底层动作：
+
+```text
+agent-knowledge record-fix --type bug --title <标题>
+```
+
+## prd
+
+用法：
+
+```powershell
+ak prd "学习完成率口径从课程维度改为课节维度"
+```
+
+作用：
+
+创建一条 PRD 纠偏记录模板，写入 `inbox/prd-corrections/`。
+
+什么时候用：
+
+- 需求范围被澄清
+- 字段含义、统计口径、流程边界被纠正
+- PRD 描述和真实业务规则不一致
+- 需求上线后需要反哺长期知识库
+
+是否写文件：
+
+是。写入 `inbox/prd-corrections/`。
+
+底层动作：
+
+```text
+agent-knowledge record-fix --type prd --title <标题>
+```
+
+## tech
+
+用法：
+
+```powershell
+ak tech "图谱接口不能混用 ACL PT 集合和教研 PT 映射"
+```
+
+作用：
+
+创建一条技术方案纠偏记录模板，写入 `inbox/tech-solution-corrections/`。
+
+什么时候用：
+
+- 技术方案的数据源、接口边界、性能策略或依赖方向被纠正
+- 发现原方案会造成 N+1、数据源不一致、错误 fallback 或服务边界混乱
+- 需要把评审结论沉淀成后续可复用经验
+
+是否写文件：
+
+是。写入 `inbox/tech-solution-corrections/`。
+
+底层动作：
+
+```text
+agent-knowledge record-fix --type tech --title <标题>
+```
+
+## rule
+
+用法：
+
+```powershell
+ak rule "聚合接口实体集合和映射来源必须一致"
+ak rule "禁止在循环中逐条远程查询" --confirmed
+```
+
+作用：
+
+新增团队规则。
+
+默认行为：
+
+不带 `--confirmed` 时写入 `inbox/rules/`，表示待确认规则草稿。
+
+确认行为：
+
+带 `--confirmed` 时写入 `knowledge/rules/`，表示已经确认的长期规则。
+
+什么时候用：
+
+- 发现团队不成文规则
+- 发现某类问题需要以后强约束
+- 代码评审、BUG 修复或技术方案纠偏后形成可复用原则
+
+是否写文件：
+
+是。默认写入 `inbox/rules/`；带 `--confirmed` 写入 `knowledge/rules/`。
+
+底层动作：
+
+```text
+agent-knowledge add-rule <规则标题> [--confirmed]
+```
+
+## raw
+
+用法：
+
+```powershell
+ak raw search "RPC 本地依赖"
+ak raw before-task "分析 graph-service 实体归属"
+```
+
+作用：
+
+透传到底层 `agent-knowledge` CLI。适合临时使用还没有封装成短命令的能力。
+
+什么时候用：
+
+- 调试底层 CLI
+- 使用还没有短命令别名的新能力
+- 复现 README 中的原始命令
+
+是否写文件：
+
+取决于透传的底层命令。

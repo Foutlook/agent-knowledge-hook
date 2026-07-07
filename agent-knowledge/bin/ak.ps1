@@ -2,6 +2,7 @@ $AgentKnowledgeRoot = Split-Path -Parent $PSScriptRoot
 $ToolRepoRoot = Split-Path -Parent $AgentKnowledgeRoot
 $WorkspaceRoot = Split-Path -Parent $ToolRepoRoot
 $AgentKnowledgeCli = Join-Path $PSScriptRoot "agent-knowledge.js"
+$AkHelpFile = Join-Path $AgentKnowledgeRoot "help\ak.zh-CN.txt"
 
 function Resolve-KnowledgeRoot {
   if ($env:AGENT_KNOWLEDGE_ROOT) {
@@ -42,6 +43,64 @@ function Write-Usage {
     "Knowledge root:",
     "  Uses AGENT_KNOWLEDGE_ROOT first; otherwise sibling team-agent-knowledge; otherwise packaged sample knowledge."
   ) -join [Environment]::NewLine
+}
+
+function Normalize-HelpTopic {
+  param(
+    [string] $Topic
+  )
+
+  switch ($Topic) {
+    "before" { return "task" }
+    "before-task" { return "task" }
+    "s" { return "search" }
+    "stale" { return "check" }
+    default { return $Topic }
+  }
+}
+
+function Write-AkHelp {
+  param(
+    [string] $Topic
+  )
+
+  if (-not (Test-Path $AkHelpFile)) {
+    Write-Usage
+    return
+  }
+
+  $lines = Get-Content -Encoding UTF8 $AkHelpFile
+  $normalizedTopic = Normalize-HelpTopic $Topic
+
+  if (-not $normalizedTopic) {
+    $lines | ForEach-Object { Write-Output $_ }
+    return
+  }
+
+  $sectionHeader = "## $normalizedTopic"
+  $capturing = $false
+  $sectionLines = New-Object System.Collections.Generic.List[string]
+
+  foreach ($line in $lines) {
+    if ($line -eq $sectionHeader) {
+      $capturing = $true
+    } elseif ($capturing -and $line.StartsWith("## ")) {
+      break
+    }
+
+    if ($capturing) {
+      $sectionLines.Add($line)
+    }
+  }
+
+  if ($sectionLines.Count -eq 0) {
+    Write-Output "Help topic not found: $Topic"
+    Write-Output ""
+    $lines | ForEach-Object { Write-Output $_ }
+    return
+  }
+
+  $sectionLines | ForEach-Object { Write-Output $_ }
 }
 
 function Invoke-AgentKnowledge {
@@ -175,8 +234,17 @@ function Show-Projects {
     }
 }
 
-if ($args.Count -eq 0 -or $args[0] -eq "help" -or $args[0] -eq "-h" -or $args[0] -eq "--help") {
-  Write-Usage
+if ($args.Count -eq 0 -or $args[0] -eq "-h" -or $args[0] -eq "--help") {
+  Write-AkHelp
+  exit 0
+}
+
+if ($args[0] -eq "help") {
+  $topic = ""
+  if ($args.Count -gt 1) {
+    $topic = $args[1]
+  }
+  Write-AkHelp $topic
   exit 0
 }
 
@@ -184,6 +252,11 @@ $command = $args[0]
 $rest = @()
 if ($args.Count -gt 1) {
   $rest = $args[1..($args.Count - 1)]
+}
+
+if ($rest -contains "--help" -or $rest -contains "-h") {
+  Write-AkHelp $command
+  exit 0
 }
 
 try {
@@ -199,6 +272,10 @@ try {
       exit 0
     }
     { $_ -in @("check", "stale") } {
+      if (-not $rest[0]) {
+        Write-AkHelp "check"
+        exit 1
+      }
       $project = Resolve-Project $rest[0]
       Invoke-AgentKnowledge -CliArgs @(
         "check-stale",
@@ -208,6 +285,10 @@ try {
     }
     "refresh" {
       $projectName = $rest[0]
+      if (-not $projectName) {
+        Write-AkHelp "refresh"
+        exit 1
+      }
       $summary = ""
       if ($rest.Count -gt 1) {
         $summary = $rest[1..($rest.Count - 1)] -join " "
@@ -225,11 +306,19 @@ try {
       )
     }
     { $_ -in @("bug", "prd", "tech") } {
+      if (-not ($rest -join " ")) {
+        Write-AkHelp $command
+        exit 1
+      }
       Invoke-AgentKnowledge -CliArgs @("record-fix", "--type", $command, "--title", ($rest -join " "))
     }
     "rule" {
       $confirmed = $rest -contains "--confirmed"
       $title = ($rest | Where-Object { $_ -ne "--confirmed" }) -join " "
+      if (-not $title) {
+        Write-AkHelp "rule"
+        exit 1
+      }
       $cliArgs = @("add-rule", $title)
       if ($confirmed) {
         $cliArgs += "--confirmed"
@@ -241,7 +330,7 @@ try {
     }
     default {
       Write-Error "Unknown ak command: $command"
-      Write-Usage
+      Write-AkHelp
       exit 1
     }
   }

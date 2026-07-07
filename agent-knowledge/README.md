@@ -19,11 +19,21 @@ powershell -ExecutionPolicy Bypass -File .\agent-knowledge\bin\ak.ps1 refresh po
 
 ```powershell
 Set-Alias ak C:\workspace\agent-knowledge-hook\agent-knowledge\bin\ak.ps1
+ak help
+ak help check
 ak task "分析实体图谱 ownerId 为空"
 ak check poseidon
 ak refresh poseidon "同步本次需求合并后的模块变化"
 ak bug "学习报告统计口径错误"
 ak rule "聚合接口实体集合和映射来源必须一致"
+```
+
+`ak help` 会直接输出中文详细帮助；`ak help <命令>` 或 `<命令> --help` 会输出单条命令的用途、适用场景、是否写文件和底层动作：
+
+```powershell
+ak help refresh
+ak check --help
+ak rule --help
 ```
 
 短命令清单：
@@ -244,6 +254,7 @@ team-agent-knowledge/
 - `inbox/prd-corrections/`：待确认 PRD 纠偏记录。
 - `inbox/tech-solution-corrections/`：待确认技术方案纠偏记录。
 - `tool-adapters/`：不同 AI 工具的接入说明。
+- `help/`：短命令的中文详细帮助文本。
 - `tests/`：命令和知识库行为测试。
 
 ## 跨平台入口
