@@ -241,6 +241,39 @@ team-agent-knowledge/
     tech-solution-corrections/
 ```
 
+## 后续 MCP 服务化思路
+
+当前版本采用命令式钩子，适合先把知识库维护流程跑稳。后续如果希望把 `agent-knowledge` 独立成一个知识库服务，可以在现有 CLI 外面增加一层 MCP Server，把常用命令包装成 AI 可发现、可调用的工具。
+
+建议的 MCP 工具设计：
+
+| MCP tool | 对应能力 |
+| --- | --- |
+| `before_task(task_description)` | 调用 `before-task`，在任务开始前返回必须阅读项和可能相关项 |
+| `search_knowledge(keyword)` | 调用 `search`，按关键词检索规则、项目说明、历史坑和服务映射 |
+| `list_projects()` | 调用 `ak projects`，列出项目索引中已登记的项目 |
+| `check_project_knowledge(project_name)` | 调用 `ak check <项目名>`，检查项目知识是否可能过期 |
+| `refresh_project_knowledge(project_name, summary)` | 调用 `ak refresh <项目名> <说明>`，在正文已核对后刷新元数据 |
+| `record_bug_fix(title, detail)` | 调用 `record-fix --type bug`，把 BUG 纠错写入 `inbox/fixes/` |
+| `record_prd_correction(title, detail)` | 调用 `record-fix --type prd`，把需求口径纠偏写入 `inbox/prd-corrections/` |
+| `record_tech_correction(title, detail)` | 调用 `record-fix --type tech`，把技术方案纠偏写入 `inbox/tech-solution-corrections/` |
+| `add_rule_draft(title, detail)` | 调用 `add-rule`，默认写入 `inbox/rules/` |
+
+推荐架构：
+
+```text
+AI 工具 / Agent
+  -> Knowledge MCP Server
+  -> agent-knowledge CLI / ak.ps1
+  -> team-agent-knowledge
+     -> knowledge/  已确认长期知识
+     -> inbox/      待确认纠偏、规则和补充材料
+```
+
+服务化后仍应保留当前的审核边界：MCP 可以负责查询、生成草稿和写入 `inbox/`，但不要让 AI 在无人工确认的情况下直接把临时判断写入正式 `knowledge/`。`refresh_project_knowledge` 也只应在项目知识正文已经基于当前代码、接口契约、查询或调用链核对后执行，避免只刷新元数据却保留旧正文。
+
+如果将来提供远程 MCP 服务，还需要补充鉴权、审计日志、写入权限控制、敏感信息脱敏和并发写入保护。对外暴露的工具名称、参数和返回值应保持稳定，让 Codex、Claude、OpenCode 或其他 Agent 可以共用同一套知识库维护能力。
+
 ## 目录说明
 
 - `bin/`：跨工具命令入口。
