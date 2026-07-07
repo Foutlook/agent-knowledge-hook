@@ -2,9 +2,11 @@
 
 import { readdir, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 const STOP_WORDS = new Set([
   'a',
@@ -37,6 +39,8 @@ const FIX_TYPE_DIRS = {
   prd: ['inbox', 'prd-corrections'],
   tech: ['inbox', 'tech-solution-corrections'],
 };
+
+const execFileAsync = promisify(execFile);
 
 export function extractKeywords(text = '') {
   const keywords = [];
@@ -164,6 +168,76 @@ export async function recordFix({ rootDir, knowledgeRoot, type, title } = {}) {
   await writeFile(filePath, content, { encoding: 'utf8' });
 
   return { path: filePath };
+}
+
+export async function checkStale({ rootDir, knowledgeRoot, projectRoot, knowledgeFile } = {}) {
+  if (!projectRoot) {
+    throw new Error('check-stale requires --project-root <path>');
+  }
+
+  if (!knowledgeFile) {
+    throw new Error('check-stale requires --knowledge-file <path>');
+  }
+
+  const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
+  const filePath = path.isAbsolute(knowledgeFile)
+    ? knowledgeFile
+    : path.join(knowledgeContext.baseDir, knowledgeFile);
+  const raw = await readFile(filePath, 'utf8');
+  const parsed = parseFrontmatter(raw);
+  const scannedCommit = readFrontmatterField(parsed.frontmatter, 'last_scanned_commit');
+  const currentCommit = await readGitHead(projectRoot);
+  const relativePath = path.isAbsolute(knowledgeFile)
+    ? toPosixPath(path.relative(knowledgeContext.baseDir, knowledgeFile))
+    : toPosixPath(knowledgeFile);
+
+  return {
+    relativePath,
+    scannedCommit,
+    currentCommit,
+    stale: !scannedCommit || scannedCommit !== currentCommit,
+    reason: scannedCommit ? 'commit_changed' : 'missing_last_scanned_commit',
+  };
+}
+
+export async function refreshProject({ rootDir, knowledgeRoot, projectRoot, knowledgeFile, summary } = {}) {
+  if (!projectRoot) {
+    throw new Error('refresh-project requires --project-root <path>');
+  }
+
+  if (!knowledgeFile) {
+    throw new Error('refresh-project requires --knowledge-file <path>');
+  }
+
+  const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
+  const filePath = path.isAbsolute(knowledgeFile)
+    ? knowledgeFile
+    : path.join(knowledgeContext.baseDir, knowledgeFile);
+  const raw = await readFile(filePath, 'utf8');
+  const parsed = parseFrontmatter(raw);
+  const currentCommit = await readGitHead(projectRoot);
+  const stamp = timestamp();
+  const relativePath = path.isAbsolute(knowledgeFile)
+    ? toPosixPath(path.relative(knowledgeContext.baseDir, knowledgeFile))
+    : toPosixPath(knowledgeFile);
+  const nextFrontmatter = updateFrontmatterFields(parsed.frontmatter, {
+    updated: stamp.isoDate,
+    project_root: path.resolve(projectRoot),
+    last_scanned_commit: currentCommit,
+  });
+  const nextBody = appendRefreshRecord(parsed.body, {
+    date: stamp.isoDate,
+    commit: currentCommit,
+    summary,
+  });
+
+  await writeFile(filePath, `---\n${nextFrontmatter}\n---\n${nextBody}`, { encoding: 'utf8' });
+
+  return {
+    relativePath,
+    currentCommit,
+    filePath,
+  };
 }
 
 function resolveKnowledgeContext({ rootDir, knowledgeRoot } = {}) {
@@ -294,6 +368,53 @@ function parseFrontmatter(raw) {
     frontmatter: normalized.slice(4, closingIndex),
     body: normalized.slice(closingIndex + 5),
   };
+}
+
+function readFrontmatterField(frontmatter, field) {
+  const escapedField = escapeRegExp(field);
+  const match = frontmatter.match(new RegExp(`^${escapedField}:\\s*(.+?)\\s*$`, 'm'));
+  if (!match) {
+    return '';
+  }
+
+  return match[1].replace(/^['"]|['"]$/g, '').trim();
+}
+
+function updateFrontmatterFields(frontmatter, fields) {
+  let nextFrontmatter = frontmatter.trimEnd();
+
+  for (const [field, value] of Object.entries(fields)) {
+    const escapedField = escapeRegExp(field);
+    const line = `${field}: ${value}`;
+    const pattern = new RegExp(`^${escapedField}:.*$`, 'm');
+    if (pattern.test(nextFrontmatter)) {
+      nextFrontmatter = nextFrontmatter.replace(pattern, line);
+    } else {
+      nextFrontmatter = nextFrontmatter ? `${nextFrontmatter}\n${line}` : line;
+    }
+  }
+
+  return nextFrontmatter;
+}
+
+function appendRefreshRecord(body, { date, commit, summary } = {}) {
+  const normalizedBody = body.startsWith('\n') ? body : `\n${body}`;
+  const cleanBody = normalizedBody.endsWith('\n') ? normalizedBody : `${normalizedBody}\n`;
+  const cleanSummary = summary?.trim() || '已根据项目当前 HEAD 确认知识条目。';
+  const entry = `- ${date}: refreshed against ${commit.slice(0, 12)}. ${cleanSummary}`;
+
+  if (cleanBody.includes('\n## 刷新记录\n')) {
+    return `${cleanBody.trimEnd()}\n${entry}\n`;
+  }
+
+  return `${cleanBody.trimEnd()}\n\n## 刷新记录\n\n${entry}\n`;
+}
+
+async function readGitHead(projectRoot) {
+  const { stdout } = await execFileAsync('git', ['-C', path.resolve(projectRoot), 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+  });
+  return stdout.trim();
 }
 
 function scoreMarkdownFile(parsed, keywords) {
@@ -438,6 +559,31 @@ function appendResultLines(lines, results) {
   }
 }
 
+function formatStaleOutput(result) {
+  const lines = ['知识库过期检查：'];
+  const currentShort = result.currentCommit.slice(0, 12);
+  const scannedShort = result.scannedCommit ? result.scannedCommit.slice(0, 12) : '未记录';
+
+  if (!result.stale) {
+    lines.push(`- ${result.relativePath} | 已是最新 | commit: ${currentShort}`);
+  } else if (result.reason === 'missing_last_scanned_commit') {
+    lines.push(`- ${result.relativePath} | 可能过期 | 缺少 last_scanned_commit | current_commit: ${currentShort}`);
+  } else {
+    lines.push(
+      `- ${result.relativePath} | 可能过期 | last_scanned_commit: ${scannedShort} | current_commit: ${currentShort}`,
+    );
+  }
+
+  return lines.join('\n');
+}
+
+function formatRefreshOutput(result) {
+  return [
+    '知识库项目刷新：',
+    `- ${result.relativePath} | 已刷新 | commit: ${result.currentCommit.slice(0, 12)}`,
+  ].join('\n');
+}
+
 function usage() {
   return [
     '用法：agent-knowledge <command> [args]',
@@ -447,6 +593,8 @@ function usage() {
     '  search <text>                                   搜索知识库',
     '  add-rule <title> [--confirmed]                  新增规则草稿或确认规则',
     '  record-fix --type <bug|prd|tech> --title <title> 记录修复经验',
+    '  check-stale --project-root <path> --knowledge-file <path> 检查知识条目是否落后于项目 HEAD',
+    '  refresh-project --project-root <path> --knowledge-file <path> [--summary <text>] 刷新项目知识元数据',
     '',
     '选项：',
     '  --knowledge-root <path>                         使用分离的私有知识库根目录',
@@ -507,6 +655,29 @@ async function main(argv) {
     return 0;
   }
 
+  if (command === 'check-stale') {
+    const options = parseOptions(globalOptions.args);
+    const result = await checkStale({
+      projectRoot: options.projectRoot,
+      knowledgeFile: options.knowledgeFile,
+      knowledgeRoot: globalOptions.knowledgeRoot,
+    });
+    console.log(formatStaleOutput(result));
+    return 0;
+  }
+
+  if (command === 'refresh-project') {
+    const options = parseOptions(globalOptions.args);
+    const result = await refreshProject({
+      projectRoot: options.projectRoot,
+      knowledgeFile: options.knowledgeFile,
+      summary: options.summary,
+      knowledgeRoot: globalOptions.knowledgeRoot,
+    });
+    console.log(formatRefreshOutput(result));
+    return 0;
+  }
+
   console.error(`未知命令：${command}\n\n${usage()}`);
   return 1;
 }
@@ -552,6 +723,25 @@ function parseOptions(args) {
         index += 1;
       }
       options.title = titleParts.join(' ');
+    } else if (arg.startsWith('--project-root=')) {
+      options.projectRoot = arg.slice('--project-root='.length);
+    } else if (arg === '--project-root') {
+      options.projectRoot = args[index + 1];
+      index += 1;
+    } else if (arg.startsWith('--knowledge-file=')) {
+      options.knowledgeFile = arg.slice('--knowledge-file='.length);
+    } else if (arg === '--knowledge-file') {
+      options.knowledgeFile = args[index + 1];
+      index += 1;
+    } else if (arg.startsWith('--summary=')) {
+      options.summary = arg.slice('--summary='.length);
+    } else if (arg === '--summary') {
+      const summaryParts = [];
+      while (args[index + 1] && !args[index + 1].startsWith('--')) {
+        summaryParts.push(args[index + 1]);
+        index += 1;
+      }
+      options.summary = summaryParts.join(' ');
     }
   }
 

@@ -75,6 +75,31 @@ async function runCliFailure(args, options = {}) {
   assert.fail(`Expected CLI to fail for args: ${args.join(' ')}`);
 }
 
+async function runGit(args, cwd) {
+  const { stdout } = await execFileAsync('git', args, {
+    cwd,
+    encoding: 'utf8',
+  });
+  return stdout.trim();
+}
+
+async function createGitProject() {
+  const projectRoot = await createTempRoot();
+  await runGit(['init'], projectRoot);
+  await writeFile(path.join(projectRoot, 'README.md'), '# demo\n', 'utf8');
+  await runGit(['add', 'README.md'], projectRoot);
+  await runGit([
+    '-c',
+    'user.name=Agent Knowledge Test',
+    '-c',
+    'user.email=agent-knowledge@example.test',
+    'commit',
+    '-m',
+    '初始化',
+  ], projectRoot);
+  return projectRoot;
+}
+
 function resultPath(result) {
   if (typeof result === 'string') {
     return result;
@@ -305,6 +330,114 @@ test('CLI search supports AGENT_KNOWLEDGE_ROOT for separated private knowledge r
 
   assert.match(stdout, /knowledge\/domain\/project-catalog-service\.md/);
   assert.doesNotMatch(stdout, /agent-knowledge\/knowledge\/rules\/aggregation-data-source-consistency\.md/);
+});
+
+test('CLI check-stale reports knowledge file when scanned commit differs from project HEAD', async () => {
+  const projectRoot = await createGitProject();
+  const oldCommit = await runGit(['rev-parse', 'HEAD'], projectRoot);
+  await writeFile(path.join(projectRoot, 'README.md'), '# demo\n\nchanged\n', 'utf8');
+  await runGit(['add', 'README.md'], projectRoot);
+  await runGit([
+    '-c',
+    'user.name=Agent Knowledge Test',
+    '-c',
+    'user.email=agent-knowledge@example.test',
+    'commit',
+    '-m',
+    '更新',
+  ], projectRoot);
+  const currentCommit = await runGit(['rev-parse', 'HEAD'], projectRoot);
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/project-demo.md',
+    [
+      '---',
+      'title: demo 项目说明',
+      'status: confirmed',
+      `project_root: ${projectRoot}`,
+      `last_scanned_commit: ${oldCommit}`,
+      '---',
+      '',
+      '# demo 项目说明',
+      '',
+    ].join('\n'),
+  );
+
+  const { stdout } = await runCli([
+    'check-stale',
+    '--project-root',
+    projectRoot,
+    '--knowledge-file',
+    'knowledge/domain/project-demo.md',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  assert.match(stdout, /可能过期/);
+  assert.match(stdout, /knowledge\/domain\/project-demo\.md/);
+  assert.match(stdout, new RegExp(oldCommit.slice(0, 12)));
+  assert.match(stdout, new RegExp(currentCommit.slice(0, 12)));
+});
+
+test('CLI refresh-project updates project metadata and appends a refresh record without replacing body', async () => {
+  const projectRoot = await createGitProject();
+  const oldCommit = await runGit(['rev-parse', 'HEAD'], projectRoot);
+  await writeFile(path.join(projectRoot, 'README.md'), '# demo\n\nchanged\n', 'utf8');
+  await runGit(['add', 'README.md'], projectRoot);
+  await runGit([
+    '-c',
+    'user.name=Agent Knowledge Test',
+    '-c',
+    'user.email=agent-knowledge@example.test',
+    'commit',
+    '-m',
+    '更新',
+  ], projectRoot);
+  const currentCommit = await runGit(['rev-parse', 'HEAD'], projectRoot);
+  const knowledgeRoot = await createTempRoot();
+  const knowledgeFile = await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/project-demo.md',
+    [
+      '---',
+      'title: demo 项目说明',
+      'status: confirmed',
+      `project_root: ${projectRoot}`,
+      `last_scanned_commit: ${oldCommit}`,
+      'updated: 2026-01-01',
+      '---',
+      '',
+      '# demo 项目说明',
+      '',
+      '人工沉淀的业务规则必须保留。',
+      '',
+    ].join('\n'),
+  );
+
+  const { stdout } = await runCli([
+    'refresh-project',
+    '--project-root',
+    projectRoot,
+    '--knowledge-file',
+    'knowledge/domain/project-demo.md',
+    '--summary',
+    '同步 README 变化',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+  const content = await readFile(knowledgeFile, 'utf8');
+
+  assert.match(stdout, /已刷新/);
+  assert.match(stdout, /knowledge\/domain\/project-demo\.md/);
+  assert.match(content, new RegExp(`last_scanned_commit: ${currentCommit}`));
+  assert.match(content, new RegExp(`project_root: ${projectRoot.replaceAll('\\', '\\\\')}`));
+  assert.match(content, /^updated: \d{4}-\d{2}-\d{2}$/m);
+  assert.match(content, /人工沉淀的业务规则必须保留。/);
+  assert.match(content, /## 刷新记录/);
+  assert.match(content, new RegExp(currentCommit.slice(0, 12)));
+  assert.match(content, /同步 README 变化/);
+  await assertNoBom(knowledgeFile);
 });
 
 test('recordFix writes to separated private knowledge repository inbox and reads packaged templates', async () => {
