@@ -9,6 +9,22 @@
 从仓库根目录运行：
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\agent-knowledge\bin\ak.ps1 task "修复 queryEntityGraph 实体图谱 ownerId 为空"
+```
+
+如果希望在当前 PowerShell 会话里直接使用 `ak`：
+
+```powershell
+Set-Alias ak C:\workspace\agent-knowledge-hook\agent-knowledge\bin\ak.ps1
+ak check poseidon
+ak refresh poseidon "同步本次需求变化"
+ak bug "学习报告统计口径错误"
+ak rule "聚合接口实体集合和映射来源必须一致"
+```
+
+底层 CLI 也可以直接调用：
+
+```powershell
 node agent-knowledge/bin/agent-knowledge.js before-task "修复 queryEntityGraph 实体图谱 ownerId 为空"
 ```
 
@@ -40,6 +56,21 @@ node agent-knowledge/bin/agent-knowledge.js search "graph-service 项目职责"
 ## 命令使用姿势
 
 以下命令都可以用 `node agent-knowledge/bin/agent-knowledge.js ...` 调用；如果已把包装器加入 PATH，也可以直接使用 `agent-knowledge ...`。
+
+日常使用优先使用短命令 `ak`：
+
+| 短命令 | 等价动作 |
+| --- | --- |
+| `ak task <任务描述>` | `before-task <任务描述>` |
+| `ak search <关键词>` | `search <关键词>` |
+| `ak projects` | 列出知识库项目索引里的项目 |
+| `ak check <项目名>` | 自动解析项目路径和知识文件后执行 `check-stale` |
+| `ak refresh <项目名> [说明]` | 自动解析项目路径和知识文件后执行 `refresh-project` |
+| `ak bug <标题>` | `record-fix --type bug --title <标题>` |
+| `ak prd <标题>` | `record-fix --type prd --title <标题>` |
+| `ak tech <标题>` | `record-fix --type tech --title <标题>` |
+| `ak rule <规则标题> [--confirmed]` | `add-rule <规则标题> [--confirmed]` |
+| `ak raw <原始参数>` | 透传到底层 `agent-knowledge` CLI |
 
 | 命令 | 什么时候用 | 是否写文件 |
 | --- | --- | --- |
@@ -138,6 +169,13 @@ macOS / Linux Shell 包装器：
 
 ```bash
 ./agent-knowledge/bin/agent-knowledge.sh before-task "分析学习流程问题"
+```
+
+短命令包装器当前提供 PowerShell 版本：
+
+```powershell
+.\agent-knowledge\bin\ak.ps1 check poseidon
+.\agent-knowledge\bin\ak.ps1 refresh poseidon "同步本次需求变化"
 ```
 
 ## 项目结构

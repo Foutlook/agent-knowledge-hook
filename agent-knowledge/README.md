@@ -6,6 +6,43 @@
 
 当前版本已经提供知识库目录、模板、种子知识、Node 核心命令和跨平台包装器。
 
+## 日常短命令
+
+日常使用优先使用 PowerShell 短命令包装器 `ak.ps1`。它会自动解析知识库根目录，并根据项目名找到项目路径和项目知识文件：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\agent-knowledge\bin\ak.ps1 check poseidon
+powershell -ExecutionPolicy Bypass -File .\agent-knowledge\bin\ak.ps1 refresh poseidon "同步本次需求变化"
+```
+
+如果希望当前 PowerShell 会话里直接输入 `ak`，可以设置别名：
+
+```powershell
+Set-Alias ak C:\workspace\agent-knowledge-hook\agent-knowledge\bin\ak.ps1
+ak task "分析实体图谱 ownerId 为空"
+ak check poseidon
+ak refresh poseidon "同步本次需求合并后的模块变化"
+ak bug "学习报告统计口径错误"
+ak rule "聚合接口实体集合和映射来源必须一致"
+```
+
+短命令清单：
+
+| 短命令 | 作用 |
+| --- | --- |
+| `ak task <任务描述>` | 任务开始前检索知识，等价于 `before-task` |
+| `ak search <关键词>` | 搜索知识库 |
+| `ak projects` | 列出项目索引中已登记的项目 |
+| `ak check <项目名>` | 自动执行项目知识过期检查 |
+| `ak refresh <项目名> [说明]` | 自动刷新项目知识元数据 |
+| `ak bug <标题>` | 记录 BUG 纠错到 inbox |
+| `ak prd <标题>` | 记录 PRD 纠错到 inbox |
+| `ak tech <标题>` | 记录技术方案纠错到 inbox |
+| `ak rule <规则标题> [--confirmed]` | 新增规则草稿或确认规则 |
+| `ak raw <原始参数>` | 透传到底层 CLI |
+
+`ak check <项目名>` 和 `ak refresh <项目名>` 依赖项目知识文件中的 `project_root`，或 `knowledge/service-map/workspace-projects.md` 中的项目路径。真实团队使用时，推荐设置 `AGENT_KNOWLEDGE_ROOT` 或把 `team-agent-knowledge` 与 `agent-knowledge-hook` 放在同一工作区下。
+
 ## 命令语法
 
 以下示例说明命令职责和调用时机。如果团队尚未安装全局 `agent-knowledge` 命令，可以从仓库根目录使用 `node agent-knowledge/bin/agent-knowledge.js ...`，或在 Windows 上使用 `.\agent-knowledge\bin\agent-knowledge.ps1 ...`。
