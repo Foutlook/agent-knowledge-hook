@@ -20,6 +20,11 @@ You **MUST** treat the user input as the task description.
    ```
 
    Replace `<任务描述>` with the task description from `$ARGUMENTS`. If the team later installs a global `agent-knowledge` command, `agent-knowledge before-task "<任务描述>"` is only a shorthand for the stable repository-local Node entry.
+   If real team knowledge is stored in a separated private knowledge repository, append `--knowledge-root <私有知识库根目录>` or use `AGENT_KNOWLEDGE_ROOT`.
+
+   ```bash
+   node C:/workspace/agent-knowledge-hook/agent-knowledge/bin/agent-knowledge.js before-task "<任务描述>" --knowledge-root C:/workspace/team-agent-knowledge
+   ```
 
 3. Inspect the command output. If it contains “必须阅读”, read every listed required item before continuing.
 4. Continue requirement analysis, BUG analysis, technical-plan review, or implementation only after the required knowledge has been read.

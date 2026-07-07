@@ -32,6 +32,11 @@ Use this command after a human corrects AI output about:
    ```
 
    If the team later installs a global `agent-knowledge` command, `agent-knowledge record-fix --type <bug|prd|tech> --title "<纠错标题>"` is only a shorthand for the stable repository-local Node entry.
+   If real team knowledge is stored in a separated private knowledge repository, append `--knowledge-root <私有知识库根目录>` or use `AGENT_KNOWLEDGE_ROOT`.
+
+   ```bash
+   node C:/workspace/agent-knowledge-hook/agent-knowledge/bin/agent-knowledge.js record-fix --type <bug|prd|tech> --title "<纠错标题>" --knowledge-root C:/workspace/team-agent-knowledge
+   ```
 
 4. Read the command output and capture the generated `inbox/` path.
 5. In the final response, tell the user the correction has been recorded and include the generated record path.

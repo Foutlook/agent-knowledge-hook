@@ -12,6 +12,14 @@ agent-knowledge before-task "<任务描述>"
 node agent-knowledge/bin/agent-knowledge.js before-task "<任务描述>"
 ```
 
+如果真实团队知识放在分离的私有知识库，必须显式指定知识库根目录：
+
+```bash
+node C:/workspace/agent-knowledge-hook/agent-knowledge/bin/agent-knowledge.js before-task "<任务描述>" --knowledge-root C:/workspace/team-agent-knowledge
+```
+
+也可以使用环境变量 `AGENT_KNOWLEDGE_ROOT` 指向私有知识库根目录；该目录应直接包含 `knowledge/` 和 `inbox/`。
+
 如果输出中出现“必须阅读”，必须先按路径读完所有必须阅读项，再给出分析结论、技术方案或代码修改建议。
 
 发生人工纠错后，使用 `record-fix` 沉淀到 `inbox/`：
@@ -24,6 +32,12 @@ agent-knowledge record-fix --type bug --title "<纠错标题>"
 
 ```bash
 node agent-knowledge/bin/agent-knowledge.js record-fix --type bug --title "<纠错标题>"
+```
+
+分离私有知识库时，纠错记录也必须写入私有知识库：
+
+```bash
+node C:/workspace/agent-knowledge-hook/agent-knowledge/bin/agent-knowledge.js record-fix --type bug --title "<纠错标题>" --knowledge-root C:/workspace/team-agent-knowledge
 ```
 
 `--type` 可选 `bug`、`prd`、`tech`，分别用于 BUG 分析纠错、PRD 理解纠错和技术方案纠错。

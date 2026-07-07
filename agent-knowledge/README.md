@@ -34,6 +34,19 @@ agent-knowledge add-rule "聚合接口实体集合和映射来源必须一致"
 agent-knowledge record-fix --type bug --title "实体图谱 ownerId 为空"
 ```
 
+如果真实团队知识与工具仓库分离，使用 `--knowledge-root` 指向私有知识库根目录：
+
+```powershell
+node C:\workspace\agent-knowledge-hook\agent-knowledge\bin\agent-knowledge.js before-task "分析 graph-service 实体归属" --knowledge-root C:\workspace\team-agent-knowledge
+```
+
+也可以设置环境变量，之后命令会默认使用该知识库：
+
+```powershell
+$env:AGENT_KNOWLEDGE_ROOT = "C:\workspace\team-agent-knowledge"
+node C:\workspace\agent-knowledge-hook\agent-knowledge\bin\agent-knowledge.js search "graph-service 项目职责"
+```
+
 `before-task` 和 `search` 的结果只提供知识入口。AI 仍必须沿真实调用链确认失败点、最终数据源和关键参数，不能因为搜索命中就直接改代码。
 
 ## knowledge 与 inbox
@@ -43,6 +56,32 @@ agent-knowledge record-fix --type bug --title "实体图谱 ownerId 为空"
 `inbox/` 存放待确认材料，包括规则草稿、纠错记录、PRD 纠偏和技术方案纠偏。这里的内容是缓冲区，不能直接当成长期规则套用，必须经过人工确认后再整理进 `knowledge/`。
 
 `add-rule` 默认写入 `inbox/rules/`，原因是新规则通常还没有经过代码、接口契约、线上问题或团队共识验证。先进入 inbox 可以避免把一次临时判断或个人偏好沉淀成仓库级强规则。
+
+推荐把工具仓库和真实知识仓库分离：
+
+```text
+agent-knowledge-hook
+= CLI、模板、适配说明、脱敏示例和测试
+
+team-agent-knowledge
+= 真实项目说明、服务关系、业务规则、历史坑和纠错记录
+```
+
+私有知识库根目录可以直接包含 `knowledge/` 和 `inbox/`：
+
+```text
+team-agent-knowledge/
+  knowledge/
+    service-map/
+    domain/
+    rules/
+    pitfalls/
+  inbox/
+    rules/
+    fixes/
+    prd-corrections/
+    tech-solution-corrections/
+```
 
 ## 目录说明
 
@@ -93,7 +132,7 @@ npm.cmd run test
 Pop-Location
 ```
 
-结果：`tests/*.test.js` 全部通过，10 个测试全部成功。测试覆盖 `add-rule` 默认写入临时 `rootDir` 下的 `inbox/rules/`，以及 `record-fix` 输出到临时 `rootDir` 下的纠错目录，验证过程不会污染真实 `agent-knowledge/inbox`。
+结果：`tests/*.test.js` 全部通过，17 个测试全部成功。测试覆盖 `add-rule` 默认写入临时 `rootDir` 下的 `inbox/rules/`，`--knowledge-root` / `AGENT_KNOWLEDGE_ROOT` 指向分离知识库，以及 `record-fix` 输出到临时目录下的纠错目录，验证过程不会污染真实 `agent-knowledge/inbox`。
 
 PowerShell 直接执行 `.ps1` 可能被执行策略拦截，因此本地验证使用 `-ExecutionPolicy Bypass` 显式运行包装器：
 

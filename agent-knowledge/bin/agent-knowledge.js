@@ -82,15 +82,14 @@ function splitIdentifier(identifier) {
   return identifier.match(/[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|$)|\d+/g) ?? [];
 }
 
-export async function searchKnowledge({ rootDir, query } = {}) {
-  const resolvedRoot = resolveRootDir(rootDir);
-  const agentKnowledgeDir = path.join(resolvedRoot, 'agent-knowledge');
+export async function searchKnowledge({ rootDir, knowledgeRoot, query } = {}) {
+  const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
   const keywords = extractKeywords(query);
-  const files = await collectMarkdownFiles(agentKnowledgeDir);
+  const files = await collectMarkdownFiles(knowledgeContext.baseDir);
   const results = [];
 
   for (const filePath of files) {
-    const parsed = await parseMarkdownFile(agentKnowledgeDir, filePath);
+    const parsed = await parseMarkdownFile(knowledgeContext, filePath);
     const scored = scoreMarkdownFile(parsed, keywords);
     if (scored.score > 0) {
       results.push({
@@ -115,20 +114,19 @@ export async function searchKnowledge({ rootDir, query } = {}) {
   });
 }
 
-export async function addRule({ rootDir, title, confirmed = false } = {}) {
+export async function addRule({ rootDir, knowledgeRoot, title, confirmed = false } = {}) {
   if (!title) {
     throw new Error('addRule requires a title');
   }
 
-  const resolvedRoot = resolveRootDir(rootDir);
-  const agentKnowledgeDir = path.join(resolvedRoot, 'agent-knowledge');
+  const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
   const status = confirmed ? 'confirmed' : 'draft';
   const targetParts = confirmed ? ['knowledge', 'rules'] : ['inbox', 'rules'];
-  const targetDir = path.join(agentKnowledgeDir, ...targetParts);
+  const targetDir = path.join(knowledgeContext.baseDir, ...targetParts);
   const stamp = timestamp();
   const slug = slugify(title);
   const fileName = slug ? `${stamp.date}-${slug}.md` : `rule-${stamp.compact}.md`;
-  const template = await readTemplate(agentKnowledgeDir, 'rule.md');
+  const template = await readTemplate(knowledgeContext.baseDir, 'rule.md');
   const content = applyTemplateFields(template, {
     title,
     status,
@@ -142,19 +140,18 @@ export async function addRule({ rootDir, title, confirmed = false } = {}) {
   return { path: filePath };
 }
 
-export async function recordFix({ rootDir, type, title } = {}) {
+export async function recordFix({ rootDir, knowledgeRoot, type, title } = {}) {
   if (!FIX_TYPE_DIRS[type]) {
     throw new Error('recordFix requires --type <bug|prd|tech>');
   }
 
-  const resolvedRoot = resolveRootDir(rootDir);
-  const agentKnowledgeDir = path.join(resolvedRoot, 'agent-knowledge');
-  const targetDir = path.join(agentKnowledgeDir, ...FIX_TYPE_DIRS[type]);
+  const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
+  const targetDir = path.join(knowledgeContext.baseDir, ...FIX_TYPE_DIRS[type]);
   const stamp = timestamp();
   const effectiveTitle = title || `fix-${stamp.compact}`;
   const slug = title ? slugify(title) : '';
   const fileName = slug ? `${stamp.date}-${slug}.md` : `fix-${stamp.compact}.md`;
-  const template = await readTemplate(agentKnowledgeDir, 'fix-record.md');
+  const template = await readTemplate(knowledgeContext.baseDir, 'fix-record.md');
   const content = applyTemplateFields(template, {
     title: effectiveTitle,
     type,
@@ -167,6 +164,23 @@ export async function recordFix({ rootDir, type, title } = {}) {
   await writeFile(filePath, content, { encoding: 'utf8' });
 
   return { path: filePath };
+}
+
+function resolveKnowledgeContext({ rootDir, knowledgeRoot } = {}) {
+  const explicitKnowledgeRoot = knowledgeRoot || (!rootDir ? process.env.AGENT_KNOWLEDGE_ROOT : '');
+
+  if (explicitKnowledgeRoot) {
+    return {
+      baseDir: path.resolve(explicitKnowledgeRoot),
+      repositoryPrefix: '',
+    };
+  }
+
+  const resolvedRoot = resolveRootDir(rootDir);
+  return {
+    baseDir: path.join(resolvedRoot, 'agent-knowledge'),
+    repositoryPrefix: 'agent-knowledge',
+  };
 }
 
 function resolveRootDir(rootDir) {
@@ -240,15 +254,19 @@ async function collectMarkdownFilesUnder(dir, files) {
   }
 }
 
-async function parseMarkdownFile(agentKnowledgeDir, filePath) {
+async function parseMarkdownFile(knowledgeContext, filePath) {
   const raw = await readFile(filePath, 'utf8');
   const parsedFrontmatter = parseFrontmatter(raw);
   const heading = parsedFrontmatter.body.match(/^#\s+(.+)$/m);
+  const relativePath = toPosixPath(path.relative(knowledgeContext.baseDir, filePath));
+  const repositoryPath = knowledgeContext.repositoryPrefix
+    ? toPosixPath(path.join(knowledgeContext.repositoryPrefix, relativePath))
+    : relativePath;
 
   return {
     fileName: path.basename(filePath),
-    relativePath: toPosixPath(path.relative(agentKnowledgeDir, filePath)),
-    repositoryPath: toPosixPath(path.join('agent-knowledge', path.relative(agentKnowledgeDir, filePath))),
+    relativePath,
+    repositoryPath,
     frontmatter: parsedFrontmatter.frontmatter,
     title: heading?.[1]?.trim() ?? '',
     body: parsedFrontmatter.body,
@@ -429,12 +447,17 @@ function usage() {
     '  search <text>                                   搜索知识库',
     '  add-rule <title> [--confirmed]                  新增规则草稿或确认规则',
     '  record-fix --type <bug|prd|tech> --title <title> 记录修复经验',
+    '',
+    '选项：',
+    '  --knowledge-root <path>                         使用分离的私有知识库根目录',
+    '  AGENT_KNOWLEDGE_ROOT                            未传参数时使用的知识库根目录环境变量',
     '  --help                                          显示帮助',
   ].join('\n');
 }
 
 async function main(argv) {
   const [command, ...args] = argv;
+  const globalOptions = parseGlobalOptions(args);
 
   if (!command || command === '--help' || command === '-h') {
     console.log(usage());
@@ -442,32 +465,43 @@ async function main(argv) {
   }
 
   if (command === 'search') {
-    const query = args.join(' ').trim();
-    const results = await searchKnowledge({ query });
+    const query = globalOptions.args.join(' ').trim();
+    const results = await searchKnowledge({
+      query,
+      knowledgeRoot: globalOptions.knowledgeRoot,
+    });
     console.log(formatSearchOutput(query, results));
     return 0;
   }
 
   if (command === 'before-task') {
-    const query = args.join(' ').trim();
-    const results = await searchKnowledge({ query });
+    const query = globalOptions.args.join(' ').trim();
+    const results = await searchKnowledge({
+      query,
+      knowledgeRoot: globalOptions.knowledgeRoot,
+    });
     console.log(formatBeforeTaskOutput(query, results));
     return 0;
   }
 
   if (command === 'add-rule') {
-    const confirmed = args.includes('--confirmed');
-    const title = args.filter((arg) => arg !== '--confirmed').join(' ').trim();
-    const result = await addRule({ title, confirmed });
+    const confirmed = globalOptions.args.includes('--confirmed');
+    const title = globalOptions.args.filter((arg) => arg !== '--confirmed').join(' ').trim();
+    const result = await addRule({
+      title,
+      confirmed,
+      knowledgeRoot: globalOptions.knowledgeRoot,
+    });
     console.log(`已写入：${result.path}`);
     return 0;
   }
 
   if (command === 'record-fix') {
-    const options = parseOptions(args);
+    const options = parseOptions(globalOptions.args);
     const result = await recordFix({
       type: options.type,
       title: options.title,
+      knowledgeRoot: globalOptions.knowledgeRoot,
     });
     console.log(`已写入：${result.path}`);
     return 0;
@@ -475,6 +509,28 @@ async function main(argv) {
 
   console.error(`未知命令：${command}\n\n${usage()}`);
   return 1;
+}
+
+function parseGlobalOptions(args) {
+  const remainingArgs = [];
+  const options = {
+    args: remainingArgs,
+    knowledgeRoot: '',
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg.startsWith('--knowledge-root=')) {
+      options.knowledgeRoot = arg.slice('--knowledge-root='.length);
+    } else if (arg === '--knowledge-root') {
+      options.knowledgeRoot = args[index + 1] ?? '';
+      index += 1;
+    } else {
+      remainingArgs.push(arg);
+    }
+  }
+
+  return options;
 }
 
 function parseOptions(args) {

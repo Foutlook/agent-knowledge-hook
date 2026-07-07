@@ -24,11 +24,24 @@ powershell -ExecutionPolicy Bypass -File .\agent-knowledge\bin\agent-knowledge.p
 node agent-knowledge/bin/agent-knowledge.js search "RPC 本地依赖"
 ```
 
+真实团队知识建议放在私有知识库仓库中，再用 `--knowledge-root` 指向它：
+
+```powershell
+node agent-knowledge/bin/agent-knowledge.js before-task "分析 graph-service 实体归属" --knowledge-root C:\workspace\team-agent-knowledge
+```
+
+也可以通过环境变量固定知识库位置：
+
+```powershell
+$env:AGENT_KNOWLEDGE_ROOT = "C:\workspace\team-agent-knowledge"
+node agent-knowledge/bin/agent-knowledge.js search "graph-service 项目职责"
+```
+
 ## 项目结构
 
 - `agent-knowledge/`：核心 CLI、模板、知识库和测试。
-- `agent-knowledge/knowledge/`：已确认的长期知识。
-- `agent-knowledge/inbox/`：待确认规则草稿和纠错记录。
+- `agent-knowledge/knowledge/`：脱敏示例知识；真实团队知识建议放入私有知识库。
+- `agent-knowledge/inbox/`：脱敏示例缓冲区；真实纠错记录建议写入私有知识库的 `inbox/`。
 - `agent-knowledge/tool-adapters/`：Codex / Claude / OpenCode 接入说明。
 - `.opencode/command/`：OpenCode 命令入口。
 - `docs/superpowers/`：设计文档和实施计划。
@@ -42,5 +55,4 @@ npm.cmd run test
 Pop-Location
 ```
 
-当前测试覆盖关键词提取、搜索排序、路径推导、写入目录、纠错记录模板和 UTF-8 无 BOM 写入。
-
+当前测试覆盖关键词提取、搜索排序、路径推导、分离知识库根目录、写入目录、纠错记录模板和 UTF-8 无 BOM 写入。

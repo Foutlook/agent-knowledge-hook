@@ -30,6 +30,13 @@ async function writeKnowledgeFile(rootDir, relativePath, content) {
   return filePath;
 }
 
+async function writeExternalKnowledgeFile(knowledgeRoot, relativePath, content) {
+  const filePath = path.join(knowledgeRoot, relativePath);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, content, 'utf8');
+  return filePath;
+}
+
 async function listMarkdownFiles(dir) {
   const entries = await readdir(dir, { withFileTypes: true });
   return entries
@@ -163,6 +170,197 @@ test('CLI search resolves repository root from script path when cwd is outside r
   assert.match(stdout, new RegExp(expectedPath.replaceAll('/', '\\/')));
   await readFile(path.join(repoRoot, ...expectedPath.split('/')), 'utf8');
   assert.doesNotMatch(stdout, /命中文件：\r?\n- 无/);
+});
+
+test('searchKnowledge reads a separated private knowledge repository root', async () => {
+  const knowledgeRoot = await createTempRoot();
+  const filePath = await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/service-map/workspace-projects.md',
+    [
+      '---',
+      'title: 本地工作区项目索引',
+      'tags: [workspace, projects]',
+      'status: confirmed',
+      '---',
+      '',
+      '# 本地工作区项目索引',
+      '',
+      'workspace projects ownership map',
+      '',
+    ].join('\n'),
+  );
+
+  const results = await searchKnowledge({ knowledgeRoot, query: 'workspace ownership' });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].relativePath, 'knowledge/service-map/workspace-projects.md');
+  assert.equal(results[0].filePath, filePath);
+});
+
+test('searchKnowledge keeps explicit rootDir isolated from AGENT_KNOWLEDGE_ROOT', async () => {
+  const rootDir = await createTempRoot();
+  const envKnowledgeRoot = await createTempRoot();
+  const originalEnv = process.env.AGENT_KNOWLEDGE_ROOT;
+
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/root-dir-hit.md',
+    [
+      '---',
+      'title: root-dir 命中',
+      'tags: [root-dir-hit]',
+      'status: confirmed',
+      '---',
+      '',
+      'root-dir-only',
+      '',
+    ].join('\n'),
+  );
+  await writeExternalKnowledgeFile(
+    envKnowledgeRoot,
+    'knowledge/rules/env-hit.md',
+    [
+      '---',
+      'title: env 命中',
+      'tags: [env-hit]',
+      'status: confirmed',
+      '---',
+      '',
+      'env-only',
+      '',
+    ].join('\n'),
+  );
+
+  try {
+    process.env.AGENT_KNOWLEDGE_ROOT = envKnowledgeRoot;
+    const results = await searchKnowledge({ rootDir, query: 'root-dir-only env-only' });
+    const resultNames = results.map((result) => path.basename(resultPath(result)));
+
+    assert.deepEqual(resultNames, ['root-dir-hit.md']);
+  } finally {
+    if (originalEnv === undefined) {
+      delete process.env.AGENT_KNOWLEDGE_ROOT;
+    } else {
+      process.env.AGENT_KNOWLEDGE_ROOT = originalEnv;
+    }
+  }
+});
+
+test('CLI search supports --knowledge-root for separated private knowledge repositories', async () => {
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/project-graph-service.md',
+    [
+      '---',
+      'title: graph-service 项目说明',
+      'tags: [graph-service]',
+      'status: confirmed',
+      '---',
+      '',
+      '# graph-service 项目说明',
+      '',
+      'graph-service handles entity graph ownership.',
+      '',
+    ].join('\n'),
+  );
+
+  const { stdout } = await runCli([
+    'search',
+    'graph-service ownership',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  assert.match(stdout, /knowledge\/domain\/project-graph-service\.md/);
+  assert.doesNotMatch(stdout, /agent-knowledge\/knowledge\/rules\/aggregation-data-source-consistency\.md/);
+});
+
+test('CLI search supports AGENT_KNOWLEDGE_ROOT for separated private knowledge repositories', async () => {
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/project-catalog-service.md',
+    [
+      '---',
+      'title: catalog-service 项目说明',
+      'tags: [catalog-service]',
+      'status: confirmed',
+      '---',
+      '',
+      '# catalog-service 项目说明',
+      '',
+      'catalog-service owns catalog status rules.',
+      '',
+    ].join('\n'),
+  );
+
+  const { stdout } = await runCli(['search', 'catalog-service status'], {
+    env: {
+      ...process.env,
+      AGENT_KNOWLEDGE_ROOT: knowledgeRoot,
+    },
+  });
+
+  assert.match(stdout, /knowledge\/domain\/project-catalog-service\.md/);
+  assert.doesNotMatch(stdout, /agent-knowledge\/knowledge\/rules\/aggregation-data-source-consistency\.md/);
+});
+
+test('recordFix writes to separated private knowledge repository inbox and reads packaged templates', async () => {
+  const knowledgeRoot = await createTempRoot();
+
+  await recordFix({
+    knowledgeRoot,
+    type: 'bug',
+    title: '私有知识库纠错记录',
+  });
+
+  const fixDir = path.join(knowledgeRoot, 'inbox', 'fixes');
+  const { filePath, content } = await readOnlyMarkdownFile(fixDir);
+
+  assert.match(content, /私有知识库纠错记录/);
+  assert.match(content, /证据链/);
+  await assertNoBom(filePath);
+});
+
+test('CLI add-rule writes to separated private knowledge repository inbox', async () => {
+  const knowledgeRoot = await createTempRoot();
+
+  await runCli([
+    'add-rule',
+    '私有知识库规则',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  const ruleDir = path.join(knowledgeRoot, 'inbox', 'rules');
+  const { filePath, content } = await readOnlyMarkdownFile(ruleDir);
+
+  assert.match(content, /私有知识库规则/);
+  assert.match(content, /^status: draft$/m);
+  await assertNoBom(filePath);
+});
+
+test('CLI record-fix writes to separated private knowledge repository inbox', async () => {
+  const knowledgeRoot = await createTempRoot();
+
+  await runCli([
+    'record-fix',
+    '--type',
+    'tech',
+    '--title',
+    '私有知识库技术方案纠偏',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  const correctionDir = path.join(knowledgeRoot, 'inbox', 'tech-solution-corrections');
+  const { filePath, content } = await readOnlyMarkdownFile(correctionDir);
+
+  assert.match(content, /私有知识库技术方案纠偏/);
+  assert.match(content, /证据链/);
+  await assertNoBom(filePath);
 });
 
 test('CLI unknown command returns non-zero and readable error', async () => {
