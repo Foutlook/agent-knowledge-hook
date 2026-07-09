@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readdir, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
@@ -41,6 +41,84 @@ const FIX_TYPE_DIRS = {
 };
 
 const execFileAsync = promisify(execFile);
+
+// --- 同义词 / 别名映射（增强召回） ---
+// 同义词文件不存在时退化为无扩展；文件格式为 { 规范词: [别名...] }，
+// 构建双向映射，使任一成员的命中都能扩展出整组候选词。
+let synonymsCache = null;
+
+function loadSynonyms() {
+  if (synonymsCache) {
+    return synonymsCache;
+  }
+
+  const candidate = path.join(path.dirname(modulePath), '..', 'synonyms.json');
+  const groups = new Map();
+  try {
+    const raw = readFileSync(candidate, 'utf8');
+    const data = JSON.parse(raw);
+    for (const [canonical, aliases] of Object.entries(data)) {
+      const group = [canonical, ...(Array.isArray(aliases) ? aliases : [])];
+      for (const term of group) {
+        groups.set(term, group);
+      }
+    }
+  } catch {
+    // 同义词文件缺省时不影响主流程
+  }
+
+  synonymsCache = groups;
+  return groups;
+}
+
+function expandWithSynonyms(keywords) {
+  const groups = loadSynonyms();
+  const expanded = [...keywords];
+  const seen = new Set(keywords);
+  for (const keyword of keywords) {
+    const group = groups.get(keyword);
+    if (!group) {
+      continue;
+    }
+    for (const term of group) {
+      if (!seen.has(term)) {
+        seen.add(term);
+        expanded.push(term);
+      }
+    }
+  }
+  return expanded;
+}
+
+export function extractQueryKeywords(query = '') {
+  const segmented = segmentChineseBigrams(extractKeywords(query));
+  return expandWithSynonyms(segmented);
+}
+
+// 对长度 >= 3 的中文整词补充相邻 2-gram，使「队列为空」这类短语也能拆出「队列」命中同义词/知识标题。
+// 仅作用于查询侧；extractKeywords 保持纯净以便单测断言顺序。
+function segmentChineseBigrams(keywords) {
+  const result = [...keywords];
+  const seen = new Set(keywords);
+  for (const keyword of keywords) {
+    if (/^[\p{Script=Han}]+$/u.test(keyword) && keyword.length >= 3) {
+      for (let index = 0; index + 1 < keyword.length; index += 1) {
+        const gram = keyword.slice(index, index + 2);
+        if (!seen.has(gram)) {
+          seen.add(gram);
+          result.push(gram);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+function toHalfWidth(text) {
+  return String(text)
+    .replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/　/g, ' ');
+}
 
 export function extractKeywords(text = '') {
   const keywords = [];
@@ -88,14 +166,15 @@ function splitIdentifier(identifier) {
 
 export async function searchKnowledge({ rootDir, knowledgeRoot, query } = {}) {
   const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
-  const keywords = extractKeywords(query);
+  const keywords = extractQueryKeywords(query);
   const files = await collectMarkdownFiles(knowledgeContext.baseDir);
   const results = [];
 
   for (const filePath of files) {
     const parsed = await parseMarkdownFile(knowledgeContext, filePath);
-    const scored = scoreMarkdownFile(parsed, keywords);
+    const scored = scoreMarkdownFile(parsed, keywords, keywords.length);
     if (scored.score > 0) {
+      const stale = await computeFileStale(parsed);
       results.push({
         path: parsed.relativePath,
         filePath,
@@ -105,11 +184,32 @@ export async function searchKnowledge({ rootDir, knowledgeRoot, query } = {}) {
         hits: scored.hits,
         title: parsed.title,
         pending: parsed.relativePath.startsWith('inbox/'),
+        coverage: scored.coverage,
+        matched: scored.matched,
+        total: scored.total,
+        exactFile: scored.exactFile,
+        exactTitle: scored.exactTitle,
+        stale: stale.stale,
+        staleReason: stale.reason,
+        snippet: buildSnippet(parsed, keywords),
       });
     }
   }
 
   return results.sort((left, right) => {
+    // 1) 覆盖率优先：命中的查询词比例越高越相关
+    if (right.coverage !== left.coverage) {
+      return right.coverage - left.coverage;
+    }
+
+    // 2) 标题 / 文件名整词精确命中加权
+    const leftExact = (left.exactTitle ? 1 : 0) + (left.exactFile ? 1 : 0);
+    const rightExact = (right.exactTitle ? 1 : 0) + (right.exactFile ? 1 : 0);
+    if (rightExact !== leftExact) {
+      return rightExact - leftExact;
+    }
+
+    // 3) 累计得分，4) 路径稳定排序
     if (right.score !== left.score) {
       return right.score - left.score;
     }
@@ -170,7 +270,7 @@ export async function recordFix({ rootDir, knowledgeRoot, type, title } = {}) {
   return { path: filePath };
 }
 
-export async function checkStale({ rootDir, knowledgeRoot, projectRoot, knowledgeFile } = {}) {
+export async function checkStale({ rootDir, knowledgeRoot, projectRoot, knowledgeFile, deep = false } = {}) {
   if (!projectRoot) {
     throw new Error('check-stale requires --project-root <path>');
   }
@@ -187,6 +287,8 @@ export async function checkStale({ rootDir, knowledgeRoot, projectRoot, knowledg
   const parsed = parseFrontmatter(raw);
   const scannedCommit = readFrontmatterField(parsed.frontmatter, 'last_scanned_commit');
   const currentCommit = await readGitHead(projectRoot);
+  const evidenceField = readFrontmatterField(parsed.frontmatter, 'evidence_files');
+  const deepResult = deep && evidenceField ? await computeDeepStale(projectRoot, scannedCommit, evidenceField) : null;
   const relativePath = path.isAbsolute(knowledgeFile)
     ? toPosixPath(path.relative(knowledgeContext.baseDir, knowledgeFile))
     : toPosixPath(knowledgeFile);
@@ -197,7 +299,31 @@ export async function checkStale({ rootDir, knowledgeRoot, projectRoot, knowledg
     currentCommit,
     stale: !scannedCommit || scannedCommit !== currentCommit,
     reason: scannedCommit ? 'commit_changed' : 'missing_last_scanned_commit',
+    deep: deepResult,
   };
+}
+
+// 深度过期：用 git diff 对比 last_scanned_commit..HEAD 的变更文件，与 frontmatter 的 evidence_files 求交集。
+// evidence_files 为逗号分隔的相对路径列表（与简单 frontmatter 风格保持一致）。
+async function computeDeepStale(projectRoot, scannedCommit, evidenceField) {
+  const evidenceFiles = evidenceField.split(',').map((entry) => entry.trim()).filter(Boolean);
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', path.resolve(projectRoot), 'diff', '--name-only', `${scannedCommit}..HEAD`],
+      { encoding: 'utf8' },
+    );
+    const changed = stdout.split('\n').map((entry) => entry.trim()).filter(Boolean);
+    const hitFiles = evidenceFiles.filter((file) => changed.some((changedFile) => changedFile.endsWith(file) || changedFile.includes(file)));
+    return {
+      changedCount: changed.length,
+      evidenceCount: evidenceFiles.length,
+      hitFiles,
+      stale: hitFiles.length > 0,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function refreshProject({ rootDir, knowledgeRoot, projectRoot, knowledgeFile, summary } = {}) {
@@ -417,35 +543,107 @@ async function readGitHead(projectRoot) {
   return stdout.trim();
 }
 
-function scoreMarkdownFile(parsed, keywords) {
+function scoreMarkdownFile(parsed, keywords, totalKeywords) {
   let score = 0;
   const hitSet = new Set();
+  const matchedKeywords = new Set();
 
   for (const keyword of keywords) {
     const needle = keyword.toLowerCase();
-    score += scoreField(parsed.fileName, needle, 8, hitSet, '文件名');
-    score += scoreField(parsed.title, needle, 8, hitSet, '标题');
-    score += scoreField(parsed.frontmatter, needle, 6, hitSet, 'frontmatter');
-    score += scoreField(parsed.body, needle, 2, hitSet, '正文');
+    score += scoreField(parsed.fileName, needle, 8, hitSet, '文件名', matchedKeywords, keyword);
+    score += scoreField(parsed.title, needle, 8, hitSet, '标题', matchedKeywords, keyword);
+    score += scoreField(parsed.frontmatter, needle, 6, hitSet, 'frontmatter', matchedKeywords, keyword);
+    score += scoreField(parsed.body, needle, 2, hitSet, '正文', matchedKeywords, keyword);
+  }
+
+  // 标题 / 文件名整词精确命中加权，避免长正文靠堆砌零散词胜出
+  let exactFile = false;
+  let exactTitle = false;
+  const baseName = parsed.fileName.replace(/\.md$/i, '');
+  const titleLower = parsed.title.toLowerCase();
+  for (const keyword of keywords) {
+    const needle = keyword.toLowerCase();
+    const wordBoundary = new RegExp(`(^|[^a-z0-9])${escapeRegExp(needle)}([^a-z0-9]|$)`, 'i');
+    if (wordBoundary.test(baseName.toLowerCase())) {
+      score += 4;
+      exactFile = true;
+    }
+    if (wordBoundary.test(titleLower)) {
+      score += 4;
+      exactTitle = true;
+    }
   }
 
   if (score > 0 && parsed.relativePath.startsWith('knowledge/')) {
     score += 2;
   }
 
+  const matched = matchedKeywords.size;
+  const total = totalKeywords || keywords.length;
+  const coverage = total > 0 ? matched / total : 0;
+
   return {
     score,
     hits: [...hitSet],
+    coverage,
+    matched,
+    total,
+    exactFile,
+    exactTitle,
   };
 }
 
-function scoreField(value, needle, points, hitSet, hitName) {
-  if (value.toLowerCase().includes(needle)) {
+function scoreField(value, needle, points, hitSet, hitName, matchedKeywords, keyword) {
+  if (toHalfWidth(value).toLowerCase().includes(toHalfWidth(needle).toLowerCase())) {
     hitSet.add(hitName);
+    if (matchedKeywords && keyword) {
+      matchedKeywords.add(keyword);
+    }
     return points;
   }
 
   return 0;
+}
+
+// 根据文件 frontmatter 的 project_root + last_scanned_commit 判断知识是否可能落后于项目 HEAD。
+// 非 knowledge/ 文件、缺少字段或 git 不可用时均视为「未知（不告警）」，失败被吞掉以避免阻断检索。
+async function computeFileStale(parsed) {
+  if (!parsed.relativePath.startsWith('knowledge/')) {
+    return { stale: false, reason: '' };
+  }
+
+  const projectRoot = readFrontmatterField(parsed.frontmatter, 'project_root');
+  const scannedCommit = readFrontmatterField(parsed.frontmatter, 'last_scanned_commit');
+  if (!projectRoot || !scannedCommit) {
+    return { stale: false, reason: '' };
+  }
+
+  try {
+    const currentCommit = await readGitHead(projectRoot);
+    const stale = scannedCommit !== currentCommit;
+    return {
+      stale,
+      reason: stale ? 'commit_changed' : 'fresh',
+    };
+  } catch {
+    return { stale: false, reason: '' };
+  }
+}
+
+// 取首个命中关键词的附近行作为摘要，减少 Agent 逐一打开文件的成本。
+function buildSnippet(parsed, keywords) {
+  const lines = [parsed.title, ...parsed.body.split('\n')];
+  for (const line of lines) {
+    const lower = toHalfWidth(line).toLowerCase();
+    for (const keyword of keywords) {
+      if (lower.includes(toHalfWidth(keyword).toLowerCase())) {
+        const trimmed = line.trim();
+        return trimmed.length > 80 ? `${trimmed.slice(0, 80)}…` : trimmed;
+      }
+    }
+  }
+
+  return '';
 }
 
 async function readTemplate(agentKnowledgeDir, templateName) {
@@ -555,7 +753,9 @@ function appendResultLines(lines, results) {
 
   for (const result of results) {
     const pending = result.pending ? '（待确认）' : '';
-    lines.push(`- ${result.repositoryPath}${pending} | 分数：${result.score} | 命中位置：${result.hits.join(', ')}`);
+    const staleTag = result.stale ? ' ⚠可能过期' : '';
+    const snippet = result.snippet ? ` | 摘要：${result.snippet}` : '';
+    lines.push(`- ${result.repositoryPath}${pending}${staleTag} | 分数：${result.score} | 命中位置：${result.hits.join(', ')}${snippet}`);
   }
 }
 
@@ -572,6 +772,18 @@ function formatStaleOutput(result) {
     lines.push(
       `- ${result.relativePath} | 可能过期 | last_scanned_commit: ${scannedShort} | current_commit: ${currentShort}`,
     );
+  }
+
+  if (result.deep) {
+    const deep = result.deep;
+    if (deep === null) {
+      lines.push(`- 深度检查不可用：无法对比 ${scannedShort}..HEAD 或缺少 evidence_files`);
+    } else {
+      const hitSuffix = deep.hitFiles.length ? `（${deep.hitFiles.join(', ')}）` : '';
+      lines.push(
+        `- 深度检查：依赖文件 ${deep.evidenceCount} 个，期间变更 ${deep.changedCount} 个，命中 ${deep.hitFiles.length} 个${hitSuffix}`,
+      );
+    }
   }
 
   return lines.join('\n');
@@ -593,7 +805,7 @@ function usage() {
     '  search <text>                                   搜索知识库',
     '  add-rule <title> [--confirmed]                  新增规则草稿或确认规则',
     '  record-fix --type <bug|prd|tech> --title <title> 记录修复经验',
-    '  check-stale --project-root <path> --knowledge-file <path> 检查知识条目是否落后于项目 HEAD',
+    '  check-stale --project-root <path> --knowledge-file <path> [--deep] 检查知识条目是否落后于项目 HEAD（--deep 比对 evidence_files）',
     '  refresh-project --project-root <path> --knowledge-file <path> [--summary <text>] 刷新项目知识元数据',
     '',
     '选项：',
@@ -660,6 +872,7 @@ async function main(argv) {
     const result = await checkStale({
       projectRoot: options.projectRoot,
       knowledgeFile: options.knowledgeFile,
+      deep: options.deep,
       knowledgeRoot: globalOptions.knowledgeRoot,
     });
     console.log(formatStaleOutput(result));
@@ -742,6 +955,8 @@ function parseOptions(args) {
         index += 1;
       }
       options.summary = summaryParts.join(' ');
+    } else if (arg === '--deep') {
+      options.deep = true;
     }
   }
 

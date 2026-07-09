@@ -1,0 +1,15 @@
+{
+  "队列": ["排队", "queue", "Queue"],
+  "错题本": ["错题", "wrong-question", "wrongQuestion"],
+  "预习": ["preview", "Preview"],
+  "掌握度": ["掌握情况", "mastery", "Mastery"],
+  "双师": ["双师课", "dual-teacher", "dualTeacher"],
+  "教练": ["辅学教练", "coach", "Coach"],
+  "签到": ["签到口令", "checkin", "CheckIn"],
+  "虚拟教室": ["虚拟课堂", "virtual-classroom", "VirtualClassroom"],
+  "事件曲线": ["事件流", "event-curve", "EventCurve", "eventCurve"],
+  "聚合": ["聚合接口", "aggregation", "Aggregation"],
+  "数据源": ["数据来源", "datasource", "DataSource"],
+  "实体": ["实体图", "entity", "Entity"],
+  "图谱": ["关系图", "graph", "Graph"]
+}

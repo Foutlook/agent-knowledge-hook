@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   addRule,
   extractKeywords,
+  extractQueryKeywords,
   recordFix,
   searchKnowledge,
 } from '../bin/agent-knowledge.js';
@@ -573,4 +574,151 @@ test('recordFix writes PRD corrections to inbox and includes evidence chain temp
 
   assert.match(content, /证据链/);
   await assertNoBom(filePath);
+});
+
+test('extractQueryKeywords expands synonyms to improve recall', () => {
+  const keywords = extractQueryKeywords('队列 为空');
+
+  assert.ok(keywords.includes('队列'));
+  assert.ok(keywords.includes('排队'));
+  assert.ok(keywords.includes('queue'));
+});
+
+test('extractQueryKeywords segments Chinese phrases into bigrams and expands synonyms', () => {
+  const keywords = extractQueryKeywords('预习题型训练队列为空');
+
+  assert.ok(keywords.includes('队列'));
+  assert.ok(keywords.includes('排队'));
+  assert.ok(keywords.includes('queue'));
+});
+
+test('searchKnowledge ranks full-coverage title match above partial body spam and includes snippet', async () => {
+  const rootDir = await createTempRoot();
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/precise.md',
+    [
+      '---',
+      'title: 队列设计',
+      'tags: [queue]',
+      'status: confirmed',
+      '---',
+      '',
+      '# 队列设计',
+      '',
+      '这里是队列的精确说明。',
+      '',
+    ].join('\n'),
+  );
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/spam.md',
+    [
+      '---',
+      'title: 无关长文',
+      'tags: [spam]',
+      'status: confirmed',
+      '---',
+      '',
+      '# 无关长文',
+      '',
+      '队列 队列 队列 队列 队列 队列 队列 队列 队列 队列 队列 队列 队列 队列 队列 队列 队列 队列 队列 队列',
+      '',
+    ].join('\n'),
+  );
+
+  const results = await searchKnowledge({ rootDir, query: '队列' });
+  const names = results.map((result) => path.basename(result.path));
+
+  assert.ok(names.indexOf('precise.md') < names.indexOf('spam.md'), 'precise should rank before spam');
+  assert.ok(results[0].snippet && results[0].snippet.length > 0, 'snippet should be present');
+});
+
+test('searchKnowledge flags stale knowledge files whose last_scanned_commit differs from project HEAD', async () => {
+  const projectRoot = await createGitProject();
+  const oldCommit = await runGit(['rev-parse', 'HEAD'], projectRoot);
+  await writeFile(path.join(projectRoot, 'README.md'), '# demo\n\nchanged\n', 'utf8');
+  await runGit(['add', 'README.md'], projectRoot);
+  await runGit([
+    '-c',
+    'user.name=Agent Knowledge Test',
+    '-c',
+    'user.email=agent-knowledge@example.test',
+    'commit',
+    '-m',
+    '更新',
+  ], projectRoot);
+
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/project-stale-demo.md',
+    [
+      '---',
+      'title: stale demo',
+      'status: confirmed',
+      `project_root: ${projectRoot}`,
+      `last_scanned_commit: ${oldCommit}`,
+      '---',
+      '',
+      '# stale demo',
+      '',
+      'stale demo content',
+      '',
+    ].join('\n'),
+  );
+
+  const results = await searchKnowledge({ knowledgeRoot, query: 'stale demo content' });
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].stale, true);
+});
+
+test('CLI check-stale --deep reports stale when evidence file changed since last scan', async () => {
+  const projectRoot = await createGitProject();
+  const oldCommit = await runGit(['rev-parse', 'HEAD'], projectRoot);
+  await mkdir(path.join(projectRoot, 'src'), { recursive: true });
+  await writeFile(path.join(projectRoot, 'src', 'foo.js'), 'console.log(1);\n', 'utf8');
+  await runGit(['add', 'src/foo.js'], projectRoot);
+  await runGit([
+    '-c',
+    'user.name=Agent Knowledge Test',
+    '-c',
+    'user.email=agent-knowledge@example.test',
+    'commit',
+    '-m',
+    '新增 foo',
+  ], projectRoot);
+
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/project-deep.md',
+    [
+      '---',
+      'title: deep demo',
+      'status: confirmed',
+      `project_root: ${projectRoot}`,
+      `last_scanned_commit: ${oldCommit}`,
+      'evidence_files: src/foo.js',
+      '---',
+      '',
+      '# deep demo',
+      '',
+    ].join('\n'),
+  );
+
+  const { stdout } = await runCli([
+    'check-stale',
+    '--project-root',
+    projectRoot,
+    '--knowledge-file',
+    'knowledge/domain/project-deep.md',
+    '--deep',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  assert.match(stdout, /深度检查/);
+  assert.match(stdout, /命中 1 个/);
 });

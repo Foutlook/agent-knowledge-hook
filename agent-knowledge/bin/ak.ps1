@@ -277,11 +277,15 @@ try {
         exit 1
       }
       $project = Resolve-Project $rest[0]
-      Invoke-AgentKnowledge -CliArgs @(
+      $cliArgs = @(
         "check-stale",
         "--project-root", $project.ProjectRoot,
         "--knowledge-file", $project.KnowledgeFile
       )
+      if ($rest -contains "--deep") {
+        $cliArgs += "--deep"
+      }
+      Invoke-AgentKnowledge -CliArgs $cliArgs
     }
     "refresh" {
       $projectName = $rest[0]

@@ -64,7 +64,7 @@ agent-knowledge before-task <text>
 agent-knowledge search <text>
 agent-knowledge add-rule <title> [--confirmed]
 agent-knowledge record-fix --type <bug|prd|tech> --title <title>
-agent-knowledge check-stale --project-root <path> --knowledge-file <path>
+agent-knowledge check-stale --project-root <path> --knowledge-file <path> [--deep]
 agent-knowledge refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]
 ```
 
@@ -87,6 +87,13 @@ agent-knowledge before-task "修复 queryEntityGraph 实体图谱 ownerId 为空
 ```
 
 `before-task` 的输出会把结果分成“必须阅读”和“可能相关”。AI 工具应先阅读必须阅读项，再进入代码分析。这个命令只读知识库，不写文件。
+
+检索增强说明：
+
+- **同义词扩展**：`synonyms.json` 维护业务术语别名（如 `队列↔排队↔queue`、`错题本↔错题↔wrong-question`）。查询中的词会被扩展成整组候选词再匹配，缓解中文子串匹配无法互通近义的问题。中文短语还会按相邻 2-gram 切分（如 `队列为空` → `队列`），使长句里的关键词也能被召回。
+- **覆盖率优先排序**：结果先按「命中的查询词比例（coverage）」排序，再按标题/文件名整词精确命中加权，最后按累计得分。这样整词精确命中的文件不会被长正文靠零散词堆砌反超。
+- **命中摘要**：每项附带首个命中关键词附近的 `摘要`，减少逐一打开文件的成本。
+- **任务时过期提示**：若知识文件 frontmatter 带有 `project_root` 与 `last_scanned_commit`，且项目 HEAD 已变，会在该项后标注 `⚠可能过期`，提醒先 `refresh-project`。
 
 在 Codex 的 `AGENTS.md` 中可以配置成固定动作：
 
@@ -151,6 +158,12 @@ agent-knowledge check-stale --project-root C:\workspace\reasearch-hub --knowledg
 ```
 
 `check-stale` 会读取知识文件 frontmatter 中的 `last_scanned_commit`，再对比 `--project-root` 当前 `git rev-parse HEAD`。如果两者不同，输出“可能过期”；如果缺少 `last_scanned_commit`，也会提示需要刷新。它只做检测，不会自动覆盖人工知识。
+
+加上 `--deep` 后会做**深度过期**检测：读取 frontmatter 的 `evidence_files`（逗号分隔的相对路径列表），用 `git diff --name-only <last_scanned_commit>..HEAD` 与变更文件求交集。即使 HEAD 已变，只要知识依赖的源文件没动就未必需要刷新；反之若依赖文件被改，则精确报出命中项。
+
+```powershell
+agent-knowledge check-stale --project-root C:\workspace\reasearch-hub --knowledge-file knowledge/domain/project-reasearch-hub.md --deep --knowledge-root C:\workspace\team-agent-knowledge
+```
 
 常见使用时机：
 
@@ -324,7 +337,7 @@ npm.cmd run test
 Pop-Location
 ```
 
-结果：`tests/*.test.js` 全部通过，19 个测试全部成功。测试覆盖 `add-rule` 默认写入临时 `rootDir` 下的 `inbox/rules/`，`--knowledge-root` / `AGENT_KNOWLEDGE_ROOT` 指向分离知识库，`check-stale` 检测知识文件落后于项目 HEAD，`refresh-project` 刷新知识文件项目元数据，以及 `record-fix` 输出到临时目录下的纠错目录，验证过程不会污染真实 `agent-knowledge/inbox`。
+结果：`tests/*.test.js` 全部通过，24 个测试全部成功。测试覆盖 `add-rule` 默认写入临时 `rootDir` 下的 `inbox/rules/`，`--knowledge-root` / `AGENT_KNOWLEDGE_ROOT` 指向分离知识库，`check-stale` 检测知识文件落后于项目 HEAD（含 `--deep` 深度比对 `evidence_files`），`refresh-project` 刷新知识文件项目元数据，同义词扩展与中文 2-gram 切分召回，覆盖率排序与命中摘要，以及 `record-fix` 输出到临时目录下的纠错目录，验证过程不会污染真实 `agent-knowledge/inbox`。
 
 PowerShell 直接执行 `.ps1` 可能被执行策略拦截，因此本地验证使用 `-ExecutionPolicy Bypass` 显式运行包装器：
 
