@@ -156,48 +156,7 @@ node agent-knowledge/bin/agent-knowledge.js refresh-project --project-root <work
 
 下图展示了钩子的端到端流转：业务开发场景被 `AGENTS.md` 强制要求先跑 `before-task`；CLI 经关键词提取与评分，从私有知识库（`team-agent-knowledge`）的 `knowledge/`（已确认）与 `inbox/`（待确认）两区返回「必须阅读项」与「可能相关项」；结论仍需回到真实代码验证；新的纠错与规则经 `record-fix` / `add-rule` 沉淀进 `inbox/`，确认后进入 `knowledge/`，形成持续改进闭环。
 
-```mermaid
-flowchart TD
-    A["业务开发场景触发<br/>需求 · BUG · 技术方案 · 评审 · 调用链 · RPC"] --> B["before-task 入口<br/>node CLI · ak.ps1 短命令 · OpenCode 命令"]
-    B --> C["检索与评分流水线<br/>① 关键词提取（中文2字 / 驼峰拆分 / 停用词）<br/>② 扫描 knowledge/ + inbox/<br/>③ 评分：文件名8 / 标题8 / frontmatter6 / 正文2"]
-    C --> D["必须阅读项<br/>score≥8 且位于 knowledge/"]
-    C --> E["可能相关项<br/>参考，非强制"]
-    D --> F["回到真实代码验证<br/>调用链 · 接口契约 · Mapper / RPC · 最终赋值点"]
-    E --> F
-    F --> G["代码实现 + 结论"]
-    G --> H["知识沉淀（闭环回流）<br/>record-fix → inbox (bug/prd/tech)<br/>add-rule → inbox/rules →（确认）knowledge/rules<br/>check-stale / refresh-project 维护新鲜度"]
-
-    subgraph KB["私有知识库 team-agent-knowledge（--knowledge-root）"]
-        direction TB
-        K["knowledge/<br/>已确认规则 · 项目说明"]
-        I["inbox/<br/>待确认纠错 · 规则"]
-    end
-
-    K -. "知识来源" .-> C
-    H -. "新纠错 / 规则回流" .-> I
-    I -. "确认后晋升" .-> K
-
-    classDef orange fill:#FDF0DC,stroke:#EF9F27,color:#854F0B;
-    classDef blue fill:#E3F0FB,stroke:#185FA5,color:#185FA5;
-    classDef purple fill:#ECEBF9,stroke:#534AB7,color:#534AB7;
-    classDef red fill:#FCE7E7,stroke:#A32D2D,color:#A32D2D;
-    classDef gray fill:#F1EFE8,stroke:#5F5E5A,color:#5F5E5A;
-    classDef green fill:#E1F5EE,stroke:#0F6E56,color:#0F6E56;
-    classDef darkgreen fill:#EAF3DE,stroke:#3B6D11,color:#3B6D11;
-    classDef pink fill:#FBEAF0,stroke:#993556,color:#993556;
-    classDef kbg fill:#F4F4F8,stroke:#6c7086,color:#2A2A38;
-    class A orange;
-    class B blue;
-    class C purple;
-    class D red;
-    class E gray;
-    class F green;
-    class G darkgreen;
-    class H pink;
-    class K green;
-    class I orange;
-    class KB kbg;
-```
+![团队知识库钩子架构流转图](docs/architecture.svg)
 
 ## 知识库位置
 

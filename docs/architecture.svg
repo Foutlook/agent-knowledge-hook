@@ -1,0 +1,86 @@
+<svg viewBox="0 0 680 700" width="100%" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>团队知识库钩子架构流转图</title>
+  <desc>展示业务开发场景触发 before-task 检索、两阶段知识输出、回到真实代码验证、以及知识沉淀回流到 knowledge 与 inbox 的闭环。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#8a8a93" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="680" height="700" fill="#1e1e2e"/>
+
+  <text x="340" y="28" text-anchor="middle" font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="15" font-weight="500" fill="#cdd6f4">团队知识库钩子 · 架构流转图</text>
+
+  <g font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif">
+    <rect x="60" y="56" width="410" height="58" rx="10" fill="#854F0B" stroke="#EF9F27" stroke-width="0.5"/>
+    <text x="265" y="82" text-anchor="middle" font-size="14" font-weight="500" fill="#FAEEDA">业务开发场景触发</text>
+    <text x="265" y="102" text-anchor="middle" font-size="12" fill="#FAC775">需求 · BUG · 技术方案 · 评审 · 调用链 · RPC</text>
+
+    <rect x="60" y="138" width="410" height="52" rx="10" fill="#185FA5" stroke="#85B7EB" stroke-width="0.5"/>
+    <text x="265" y="162" text-anchor="middle" font-size="14" font-weight="500" fill="#B5D4F4">before-task 入口（任务前知识检索）</text>
+    <text x="265" y="180" text-anchor="middle" font-size="12" fill="#85B7EB">node CLI · ak.ps1 短命令 · OpenCode 命令</text>
+
+    <rect x="60" y="214" width="410" height="80" rx="10" fill="#534AB7" stroke="#AFA9EC" stroke-width="0.5"/>
+    <text x="265" y="238" text-anchor="middle" font-size="14" font-weight="500" fill="#CECBF6">检索与评分流水线</text>
+    <text x="265" y="260" text-anchor="middle" font-size="11.5" fill="#AFA9EC">① 关键词提取（中文2字 / 驼峰拆分 / 停用词）</text>
+    <text x="265" y="278" text-anchor="middle" font-size="11.5" fill="#AFA9EC">② 扫描 knowledge/ + inbox/</text>
+    <text x="265" y="296" text-anchor="middle" font-size="11.5" fill="#AFA9EC">③ 评分：文件名8 / 标题8 / frontmatter6 / 正文2</text>
+
+    <rect x="60" y="316" width="195" height="66" rx="10" fill="#A32D2D" stroke="#F09595" stroke-width="0.5"/>
+    <text x="157" y="344" text-anchor="middle" font-size="14" font-weight="500" fill="#FCEBEB">必须阅读项</text>
+    <text x="157" y="364" text-anchor="middle" font-size="11" fill="#F7C1C1">score≥8 且 knowledge/</text>
+
+    <rect x="275" y="316" width="195" height="66" rx="10" fill="#5F5E5A" stroke="#B4B2A9" stroke-width="0.5"/>
+    <text x="372" y="344" text-anchor="middle" font-size="14" font-weight="500" fill="#F1EFE8">可能相关项</text>
+    <text x="372" y="364" text-anchor="middle" font-size="11" fill="#D3D1C7">参考，非强制</text>
+
+    <rect x="60" y="406" width="410" height="54" rx="10" fill="#0F6E56" stroke="#5DCAA5" stroke-width="0.5"/>
+    <text x="265" y="428" text-anchor="middle" font-size="14" font-weight="500" fill="#E1F5EE">回到真实代码验证</text>
+    <text x="265" y="446" text-anchor="middle" font-size="11.5" fill="#9FE1CB">调用链 · 接口契约 · Mapper/RPC · 最终赋值点</text>
+
+    <rect x="60" y="484" width="410" height="52" rx="10" fill="#3B6D11" stroke="#97C459" stroke-width="0.5"/>
+    <text x="265" y="510" text-anchor="middle" font-size="14" font-weight="500" fill="#EAF3DE">代码实现 + 结论</text>
+
+    <rect x="60" y="584" width="410" height="100" rx="10" fill="#993556" stroke="#ED93B1" stroke-width="0.5"/>
+    <text x="265" y="608" text-anchor="middle" font-size="14" font-weight="500" fill="#FBEAF0">知识沉淀（闭环回流）</text>
+    <text x="265" y="630" text-anchor="middle" font-size="11.5" fill="#F4C0D1">record-fix → inbox (bug/prd/tech)</text>
+    <text x="265" y="648" text-anchor="middle" font-size="11" fill="#F4C0D1">add-rule → inbox/rules →（确认）knowledge/rules</text>
+    <text x="265" y="666" text-anchor="middle" font-size="11" fill="#F4C0D1">check-stale / refresh-project 维护新鲜度</text>
+
+    <rect x="510" y="140" width="140" height="300" rx="12" fill="#2A2A38" stroke="#6c7086" stroke-width="0.5"/>
+    <text x="580" y="162" text-anchor="middle" font-size="13" font-weight="500" fill="#cdd6f4">私有知识库</text>
+    <text x="580" y="180" text-anchor="middle" font-size="10.5" fill="#a6adc8">team-agent-knowledge</text>
+
+    <rect x="525" y="194" width="110" height="64" rx="8" fill="#0F6E56" stroke="#5DCAA5" stroke-width="0.5"/>
+    <text x="580" y="218" text-anchor="middle" font-size="12" font-weight="500" fill="#E1F5EE">knowledge/</text>
+    <text x="580" y="236" text-anchor="middle" font-size="10" fill="#9FE1CB">已确认规则·项目说明</text>
+
+    <rect x="525" y="274" width="110" height="64" rx="8" fill="#854F0B" stroke="#EF9F27" stroke-width="0.5"/>
+    <text x="580" y="298" text-anchor="middle" font-size="12" font-weight="500" fill="#FAEEDA">inbox/</text>
+    <text x="580" y="316" text-anchor="middle" font-size="10" fill="#FAC775">待确认纠错·规则</text>
+
+    <text x="580" y="368" text-anchor="middle" font-size="10" fill="#a6adc8">⇄ agent-knowledge-hook</text>
+    <text x="580" y="384" text-anchor="middle" font-size="9" fill="#6c7086">（--knowledge-root）</text>
+  </g>
+
+  <g stroke="#8a8a93" stroke-width="1.5" fill="none" marker-end="url(#arrow)">
+    <line x1="265" y1="114" x2="265" y2="138"/>
+    <line x1="265" y1="190" x2="265" y2="214"/>
+    <line x1="265" y1="294" x2="265" y2="316"/>
+    <line x1="157" y1="382" x2="157" y2="406"/>
+    <line x1="372" y1="382" x2="372" y2="406"/>
+    <line x1="265" y1="460" x2="265" y2="484"/>
+    <line x1="265" y1="536" x2="265" y2="584"/>
+    <line x1="525" y1="226" x2="470" y2="245"/>
+    <line x1="470" y1="164" x2="510" y2="164"/>
+  </g>
+
+  <path d="M470 634 L500 634 L500 306 L525 306" stroke="#ED93B1" stroke-width="1.5" stroke-dasharray="4 3" fill="none" marker-end="url(#arrow)"/>
+
+  <g font-family="'PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif" font-size="10" fill="#a6adc8">
+    <text x="272" y="128" font-size="10" fill="#cdd6f4">AGENTS.md 强制前置</text>
+    <text x="505" y="212" text-anchor="middle" font-size="9" fill="#9FE1CB">知识来源</text>
+    <text x="490" y="156" text-anchor="middle" font-size="9" fill="#cdd6f4">--knowledge-root</text>
+    <text x="508" y="478" text-anchor="middle" font-size="9" fill="#ED93B1">新纠错 / 规则回流</text>
+  </g>
+</svg>
