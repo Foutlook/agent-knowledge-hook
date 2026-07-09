@@ -18,7 +18,7 @@ powershell -ExecutionPolicy Bypass -File .\agent-knowledge\bin\ak.ps1 refresh po
 如果希望当前 PowerShell 会话里直接输入 `ak`，可以设置别名：
 
 ```powershell
-Set-Alias ak C:\workspace\agent-knowledge-hook\agent-knowledge\bin\ak.ps1
+Set-Alias ak <workspace-root>\agent-knowledge-hook\agent-knowledge\bin\ak.ps1
 ak help
 ak help check
 ak task "分析实体图谱 ownerId 为空"
@@ -49,6 +49,8 @@ ak rule --help
 | `ak prd <标题>` | 记录 PRD 纠错到 inbox |
 | `ak tech <标题>` | 记录技术方案纠错到 inbox |
 | `ak rule <规则标题> [--confirmed]` | 新增规则草稿或确认规则 |
+| `ak promote <文件>` | 将 inbox 待确认条目晋升到 knowledge |
+| `ak pending` | 列出 inbox 下所有待确认条目 |
 | `ak raw <原始参数>` | 透传到底层 CLI |
 
 `ak check <项目名>` 和 `ak refresh <项目名>` 依赖项目知识文件中的 `project_root`，或 `knowledge/service-map/workspace-projects.md` 中的项目路径。真实团队使用时，推荐设置 `AGENT_KNOWLEDGE_ROOT` 或把 `team-agent-knowledge` 与 `agent-knowledge-hook` 放在同一工作区下。
@@ -66,15 +68,20 @@ agent-knowledge add-rule <title> [--confirmed]
 agent-knowledge record-fix --type <bug|prd|tech> --title <title>
 agent-knowledge check-stale --project-root <path> --knowledge-file <path> [--deep]
 agent-knowledge refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]
+agent-knowledge promote --file <path>
+agent-knowledge list-pending
 ```
 
 通用选项：
 
 ```text
 --knowledge-root <path>
+--json
 ```
 
 如果没有传 `--knowledge-root`，命令会优先读取环境变量 `AGENT_KNOWLEDGE_ROOT`；如果环境变量也不存在，则使用当前工具目录内置的示例知识库。
+
+`--json` 可用于 `before-task`、`search` 与 `check-stale`，把结果以结构化 JSON 输出（含 `mustRead`、`coverage`、`stale`、`snippet` 等字段），便于 OpenCode / Codex 等自动化管线直接解析，无需对文本做正则处理。
 
 ## 命令使用姿势
 
@@ -100,7 +107,7 @@ agent-knowledge before-task "修复 queryEntityGraph 实体图谱 ownerId 为空
 ```markdown
 Before analyzing a requirement, bug, or technical plan, run:
 
-`node C:\workspace\agent-knowledge-hook\agent-knowledge\bin\agent-knowledge.js before-task "<任务描述>" --knowledge-root C:\workspace\team-agent-knowledge`
+`node <workspace-root>\agent-knowledge-hook\agent-knowledge\bin\agent-knowledge.js before-task "<任务描述>" --knowledge-root <workspace-root>\team-agent-knowledge`
 ```
 
 ### search
@@ -154,7 +161,7 @@ agent-knowledge record-fix --type bug --title "实体图谱 ownerId 为空"
 检查某个项目说明是否落后于项目当前 HEAD：
 
 ```powershell
-agent-knowledge check-stale --project-root C:\workspace\reasearch-hub --knowledge-file knowledge/domain/project-reasearch-hub.md --knowledge-root C:\workspace\team-agent-knowledge
+agent-knowledge check-stale --project-root <workspace-root>\reasearch-hub --knowledge-file knowledge/domain/project-reasearch-hub.md --knowledge-root <workspace-root>\team-agent-knowledge
 ```
 
 `check-stale` 会读取知识文件 frontmatter 中的 `last_scanned_commit`，再对比 `--project-root` 当前 `git rev-parse HEAD`。如果两者不同，输出“可能过期”；如果缺少 `last_scanned_commit`，也会提示需要刷新。它只做检测，不会自动覆盖人工知识。
@@ -162,7 +169,7 @@ agent-knowledge check-stale --project-root C:\workspace\reasearch-hub --knowledg
 加上 `--deep` 后会做**深度过期**检测：读取 frontmatter 的 `evidence_files`（逗号分隔的相对路径列表），用 `git diff --name-only <last_scanned_commit>..HEAD` 与变更文件求交集。即使 HEAD 已变，只要知识依赖的源文件没动就未必需要刷新；反之若依赖文件被改，则精确报出命中项。
 
 ```powershell
-agent-knowledge check-stale --project-root C:\workspace\reasearch-hub --knowledge-file knowledge/domain/project-reasearch-hub.md --deep --knowledge-root C:\workspace\team-agent-knowledge
+agent-knowledge check-stale --project-root <workspace-root>\reasearch-hub --knowledge-file knowledge/domain/project-reasearch-hub.md --deep --knowledge-root <workspace-root>\team-agent-knowledge
 ```
 
 常见使用时机：
@@ -176,7 +183,7 @@ agent-knowledge check-stale --project-root C:\workspace\reasearch-hub --knowledg
 在人工或 Codex 已完成正文核对后，刷新项目知识文件的元数据：
 
 ```powershell
-agent-knowledge refresh-project --project-root C:\workspace\reasearch-hub --knowledge-file knowledge/domain/project-reasearch-hub.md --summary "同步 Facade 和模块结构变化" --knowledge-root C:\workspace\team-agent-knowledge
+agent-knowledge refresh-project --project-root <workspace-root>\reasearch-hub --knowledge-file knowledge/domain/project-reasearch-hub.md --summary "同步 Facade 和模块结构变化" --knowledge-root <workspace-root>\team-agent-knowledge
 ```
 
 `refresh-project` 会更新 `updated`、`project_root`、`last_scanned_commit`，并在正文末尾追加“刷新记录”。它不会自动重写项目说明正文；正文里的业务规则、接口关系和证据链仍需要由 Codex 或人工基于当前代码确认后再修改。
@@ -191,19 +198,54 @@ agent-knowledge refresh-project --project-root C:\workspace\reasearch-hub --know
 
 不要在没有核对正文的情况下只运行 `refresh-project`，否则 `last_scanned_commit` 会显示已刷新，但正文仍可能是旧内容。
 
+### promote
+
+把 inbox 下的待确认条目晋升为已确认知识：移动到 `knowledge/` 下对应的子目录（映射规则为 `inbox/<sub>/file.md` → `knowledge/<sub>/file.md`），并把 frontmatter 的 `status` 改为 `confirmed`。
+
+```powershell
+agent-knowledge promote --file inbox/rules/2026-07-09-aggregation-rule.md
+```
+
+`promote` 只接受 `inbox/` 下的文件；若误传 `knowledge/` 下的文件会报错。晋升后原 inbox 文件会被删除，新文件落在 `knowledge/` 对应目录。如果团队还有「项目索引」或「规则索引」需要同步引用，晋升后可人工补一条索引引用。
+
+典型节奏：纠错记录或规则草稿在 `inbox/` 沉淀一段时间后，由人工确认其长期有效性，再用 `promote` 晋升，避免 inbox 长期堆积未确认项。
+
+### list-pending
+
+列出 `inbox/` 下所有待确认条目，便于发现堆积：
+
+```powershell
+agent-knowledge list-pending
+```
+
+输出每行包含相对路径、`status`、`type` 与 `updated`，方便判断哪些条目已挂起过久、需要确认或清理。
+
+### --json
+
+`before-task`、`search`、`check-stale` 支持 `--json`，输出结构化结果：
+
+```powershell
+agent-knowledge search "graph-service 实体归属" --json
+```
+
+各字段含义：
+
+- `before-task` / `search`：`results[].mustRead`（是否必须阅读）、`coverage`（查询词命中比例）、`matched` / `total`、`stale`、`staleReason`、`snippet`、`hits`。
+- `check-stale`：`scannedCommit`、`currentCommit`、`stale`、`reason`，以及 `--deep` 时的 `deep.hitFiles` 等。
+
 ### --knowledge-root 与环境变量
 
 如果真实团队知识与工具仓库分离，使用 `--knowledge-root` 指向私有知识库根目录：
 
 ```powershell
-node C:\workspace\agent-knowledge-hook\agent-knowledge\bin\agent-knowledge.js before-task "分析 graph-service 实体归属" --knowledge-root C:\workspace\team-agent-knowledge
+node <workspace-root>\agent-knowledge-hook\agent-knowledge\bin\agent-knowledge.js before-task "分析 graph-service 实体归属" --knowledge-root <workspace-root>\team-agent-knowledge
 ```
 
 也可以设置环境变量，之后命令会默认使用该知识库：
 
 ```powershell
-$env:AGENT_KNOWLEDGE_ROOT = "C:\workspace\team-agent-knowledge"
-node C:\workspace\agent-knowledge-hook\agent-knowledge\bin\agent-knowledge.js search "graph-service 项目职责"
+$env:AGENT_KNOWLEDGE_ROOT = "<workspace-root>\team-agent-knowledge"
+node <workspace-root>\agent-knowledge-hook\agent-knowledge\bin\agent-knowledge.js search "graph-service 项目职责"
 ```
 
 `before-task` 和 `search` 的结果只提供知识入口。AI 仍必须沿真实调用链确认失败点、最终数据源和关键参数，不能因为搜索命中就直接改代码。
@@ -328,7 +370,7 @@ node agent-knowledge\bin\agent-knowledge.js search "RPC 本地依赖"
 2026-07-06 在 Windows PowerShell 环境完成以下验证。以下命令均从仓库根目录执行，例如：
 
 ```powershell
-cd C:\workspace\agent-knowledge-hook
+cd <workspace-root>\agent-knowledge-hook
 ```
 
 ```powershell
@@ -337,7 +379,7 @@ npm.cmd run test
 Pop-Location
 ```
 
-结果：`tests/*.test.js` 全部通过，24 个测试全部成功。测试覆盖 `add-rule` 默认写入临时 `rootDir` 下的 `inbox/rules/`，`--knowledge-root` / `AGENT_KNOWLEDGE_ROOT` 指向分离知识库，`check-stale` 检测知识文件落后于项目 HEAD（含 `--deep` 深度比对 `evidence_files`），`refresh-project` 刷新知识文件项目元数据，同义词扩展与中文 2-gram 切分召回，覆盖率排序与命中摘要，以及 `record-fix` 输出到临时目录下的纠错目录，验证过程不会污染真实 `agent-knowledge/inbox`。
+结果：`tests/*.test.js` 全部通过，31 个测试全部成功。测试覆盖 `add-rule` 默认写入临时 `rootDir` 下的 `inbox/rules/`，`--knowledge-root` / `AGENT_KNOWLEDGE_ROOT` 指向分离知识库，`check-stale` 检测知识文件落后于项目 HEAD（含 `--deep` 深度比对 `evidence_files`），`refresh-project` 刷新知识文件项目元数据，同义词扩展与中文 2-gram 切分召回，覆盖率排序与命中摘要，`promote` 晋升与 `list-pending` 待确认清单，`--json` 机读输出，以及 `record-fix` 输出到临时目录下的纠错目录，验证过程不会污染真实 `agent-knowledge/inbox`。
 
 PowerShell 直接执行 `.ps1` 可能被执行策略拦截，因此本地验证使用 `-ExecutionPolicy Bypass` 显式运行包装器：
 

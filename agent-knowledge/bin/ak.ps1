@@ -31,7 +31,12 @@ function Write-Usage {
     "  ak prd <title>                         Record a PRD correction note",
     "  ak tech <title>                        Record a technical correction note",
     "  ak rule <title> [--confirmed]          Add a draft or confirmed rule",
+    "  ak promote <file>                      Promote an inbox draft into knowledge/",
+    "  ak pending                             List pending inbox items",
     "  ak raw <agent-knowledge args>          Forward args to the base CLI",
+    "",
+    "Options:",
+    "  --json (task/search/check)             Output JSON for automation pipelines",
     "",
     "Examples:",
     "  ak task `"analyze empty ownerId in entity graph`"",
@@ -262,10 +267,16 @@ if ($rest -contains "--help" -or $rest -contains "-h") {
 try {
   switch ($command) {
     { $_ -in @("task", "before", "before-task") } {
-      Invoke-AgentKnowledge -CliArgs @("before-task", ($rest -join " "))
+      $queryParts = $rest | Where-Object { $_ -ne "--json" }
+      $cliArgs = @("before-task", ($queryParts -join " "))
+      if ($rest -contains "--json") { $cliArgs += "--json" }
+      Invoke-AgentKnowledge -CliArgs $cliArgs
     }
     { $_ -in @("search", "s") } {
-      Invoke-AgentKnowledge -CliArgs @("search", ($rest -join " "))
+      $queryParts = $rest | Where-Object { $_ -ne "--json" }
+      $cliArgs = @("search", ($queryParts -join " "))
+      if ($rest -contains "--json") { $cliArgs += "--json" }
+      Invoke-AgentKnowledge -CliArgs $cliArgs
     }
     "projects" {
       Show-Projects
@@ -284,6 +295,9 @@ try {
       )
       if ($rest -contains "--deep") {
         $cliArgs += "--deep"
+      }
+      if ($rest -contains "--json") {
+        $cliArgs += "--json"
       }
       Invoke-AgentKnowledge -CliArgs $cliArgs
     }
@@ -328,6 +342,16 @@ try {
         $cliArgs += "--confirmed"
       }
       Invoke-AgentKnowledge -CliArgs $cliArgs
+    }
+    "promote" {
+      if (-not $rest[0]) {
+        Write-AkHelp "promote"
+        exit 1
+      }
+      Invoke-AgentKnowledge -CliArgs @("promote", "--file", $rest[0])
+    }
+    "pending" {
+      Invoke-AgentKnowledge -CliArgs @("list-pending")
     }
     "raw" {
       Invoke-AgentKnowledge -CliArgs $rest

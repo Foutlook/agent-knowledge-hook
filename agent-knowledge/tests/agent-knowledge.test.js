@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -11,6 +12,8 @@ import {
   addRule,
   extractKeywords,
   extractQueryKeywords,
+  listPending,
+  promote,
   recordFix,
   searchKnowledge,
 } from '../bin/agent-knowledge.js';
@@ -721,4 +724,188 @@ test('CLI check-stale --deep reports stale when evidence file changed since last
 
   assert.match(stdout, /深度检查/);
   assert.match(stdout, /命中 1 个/);
+});
+
+test('promote moves inbox draft into knowledge and marks confirmed', async () => {
+  const knowledgeRoot = await createTempRoot();
+  const source = await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'inbox/rules/draft-rule.md',
+    [
+      '---',
+      'title: 草稿规则',
+      'status: draft',
+      '---',
+      '',
+      '# 草稿规则',
+      '',
+      '草稿内容',
+      '',
+    ].join('\n'),
+  );
+
+  const result = await promote({ knowledgeRoot, file: 'inbox/rules/draft-rule.md' });
+
+  assert.equal(result.source, 'inbox/rules/draft-rule.md');
+  assert.equal(result.target, 'knowledge/rules/draft-rule.md');
+  assert.ok(existsSync(path.join(knowledgeRoot, 'knowledge', 'rules', 'draft-rule.md')));
+  assert.ok(!existsSync(source), 'source inbox file should be removed');
+  const content = await readFile(path.join(knowledgeRoot, 'knowledge', 'rules', 'draft-rule.md'), 'utf8');
+  assert.match(content, /^status: confirmed$/m);
+  assert.match(content, /草稿内容/);
+});
+
+test('promote rejects files outside inbox', async () => {
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/rules/already.md',
+    ['---', 'title: x', 'status: confirmed', '---', '', 'x', ''].join('\n'),
+  );
+
+  await assert.rejects(
+    promote({ knowledgeRoot, file: 'knowledge/rules/already.md' }),
+    /inbox/,
+  );
+});
+
+test('listPending lists inbox items with status and type', async () => {
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'inbox/rules/draft.md',
+    ['---', 'title: d', 'status: draft', '---', '', 'x', ''].join('\n'),
+  );
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'inbox/fixes/bug.md',
+    ['---', 'title: b', 'type: bug', 'status: pending', '---', '', 'y', ''].join('\n'),
+  );
+
+  const items = await listPending({ knowledgeRoot });
+
+  assert.equal(items.length, 2);
+  const draft = items.find((item) => item.relativePath === 'inbox/rules/draft.md');
+  assert.ok(draft);
+  assert.equal(draft.status, 'draft');
+  const bug = items.find((item) => item.relativePath === 'inbox/fixes/bug.md');
+  assert.ok(bug);
+  assert.equal(bug.status, 'pending');
+  assert.equal(bug.type, 'bug');
+  assert.ok(bug.mtime);
+});
+
+test('CLI promote moves inbox file into knowledge', async () => {
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'inbox/rules/cli-draft.md',
+    ['---', 'title: c', 'status: draft', '---', '', 'c', ''].join('\n'),
+  );
+
+  const { stdout } = await runCli([
+    'promote',
+    '--file',
+    'inbox/rules/cli-draft.md',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  assert.match(stdout, /已晋升/);
+  assert.ok(existsSync(path.join(knowledgeRoot, 'knowledge', 'rules', 'cli-draft.md')));
+  assert.ok(!existsSync(path.join(knowledgeRoot, 'inbox', 'rules', 'cli-draft.md')));
+});
+
+test('CLI list-pending lists inbox drafts', async () => {
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'inbox/rules/cli-pending.md',
+    ['---', 'title: p', 'status: draft', '---', '', 'p', ''].join('\n'),
+  );
+
+  const { stdout } = await runCli(['list-pending', '--knowledge-root', knowledgeRoot]);
+
+  assert.match(stdout, /待确认知识清单/);
+  assert.match(stdout, /inbox\/rules\/cli-pending\.md/);
+});
+
+test('CLI search --json outputs parseable JSON with mustRead flags', async () => {
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/project-g.md',
+    [
+      '---',
+      'title: g',
+      'status: confirmed',
+      '---',
+      '',
+      '# g',
+      '',
+      'graph-service owns entity graph.',
+      '',
+    ].join('\n'),
+  );
+
+  const { stdout } = await runCli([
+    'search',
+    'graph-service',
+    '--json',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  const parsed = JSON.parse(stdout);
+  assert.equal(parsed.command, 'search');
+  assert.ok(Array.isArray(parsed.results));
+  assert.equal(parsed.results.length, 1);
+  assert.equal(parsed.results[0].mustRead, true);
+});
+
+test('CLI check-stale --json outputs parseable JSON', async () => {
+  const projectRoot = await createGitProject();
+  const oldCommit = await runGit(['rev-parse', 'HEAD'], projectRoot);
+  await writeFile(path.join(projectRoot, 'README.md'), '# demo\n\nchanged\n', 'utf8');
+  await runGit(['add', 'README.md'], projectRoot);
+  await runGit([
+    '-c',
+    'user.name=Agent Knowledge Test',
+    '-c',
+    'user.email=agent-knowledge@example.test',
+    'commit',
+    '-m',
+    '更新',
+  ], projectRoot);
+  const knowledgeRoot = await createTempRoot();
+  await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/project-j.md',
+    [
+      '---',
+      'title: j',
+      'status: confirmed',
+      `project_root: ${projectRoot}`,
+      `last_scanned_commit: ${oldCommit}`,
+      '---',
+      '',
+      '# j',
+      '',
+    ].join('\n'),
+  );
+
+  const { stdout } = await runCli([
+    'check-stale',
+    '--project-root',
+    projectRoot,
+    '--knowledge-file',
+    'knowledge/domain/project-j.md',
+    '--json',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  const parsed = JSON.parse(stdout);
+  assert.equal(parsed.command, 'check-stale');
+  assert.equal(parsed.stale, true);
 });

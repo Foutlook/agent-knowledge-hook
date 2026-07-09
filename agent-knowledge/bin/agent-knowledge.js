@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readdir, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readdir, mkdir, readFile, writeFile, rm, stat } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
@@ -364,6 +364,78 @@ export async function refreshProject({ rootDir, knowledgeRoot, projectRoot, know
     currentCommit,
     filePath,
   };
+}
+
+// 晋升：将 inbox 下的待确认文件移动到 knowledge 对应子目录，frontmatter status 改为 confirmed。
+// 目录映射规则：inbox/<sub>/file.md -> knowledge/<sub>/file.md（sub 为 inbox 下的即时子目录）。
+export async function promote({ rootDir, knowledgeRoot, file } = {}) {
+  if (!file) {
+    throw new Error('promote requires --file <path>');
+  }
+
+  const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
+  const sourcePath = path.isAbsolute(file)
+    ? file
+    : path.join(knowledgeContext.baseDir, file);
+  const raw = await readFile(sourcePath, 'utf8');
+  const parsed = parseFrontmatter(raw);
+  const relativeSource = toPosixPath(path.relative(knowledgeContext.baseDir, sourcePath));
+
+  if (!relativeSource.startsWith('inbox/')) {
+    throw new Error(`promote only applies to inbox files, got: ${relativeSource}`);
+  }
+
+  const subPath = relativeSource.slice('inbox/'.length);
+  const subDir = path.dirname(subPath);
+  const targetDir = path.join(knowledgeContext.baseDir, 'knowledge', subDir);
+  await mkdir(targetDir, { recursive: true });
+  const targetPath = path.join(targetDir, path.basename(sourcePath));
+  const nextFrontmatter = updateFrontmatterFields(parsed.frontmatter, { status: 'confirmed' });
+
+  await writeFile(targetPath, `---\n${nextFrontmatter}\n---\n${parsed.body}`, { encoding: 'utf8' });
+  await rm(sourcePath, { force: true });
+
+  const relativeTarget = toPosixPath(path.relative(knowledgeContext.baseDir, targetPath));
+  return {
+    source: relativeSource,
+    target: relativeTarget,
+    filePath: targetPath,
+  };
+}
+
+// 待确认清单：遍历 inbox/ 下所有 .md，输出相对路径、status、type 与最后修改时间，便于发现堆积项。
+export async function listPending({ rootDir, knowledgeRoot } = {}) {
+  const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
+  const inboxDir = path.join(knowledgeContext.baseDir, 'inbox');
+  const items = [];
+
+  if (existsSync(inboxDir)) {
+    await collectPendingUnder(inboxDir, knowledgeContext.baseDir, items);
+  }
+
+  return items.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+}
+
+async function collectPendingUnder(dir, baseDir, items) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await collectPendingUnder(entryPath, baseDir, items);
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      const raw = await readFile(entryPath, 'utf8');
+      const parsed = parseFrontmatter(raw);
+      const fm = parsed.frontmatter;
+      const stats = await stat(entryPath);
+      items.push({
+        relativePath: toPosixPath(path.relative(baseDir, entryPath)),
+        status: readFrontmatterField(fm, 'status') || 'unknown',
+        type: readFrontmatterField(fm, 'type') || '',
+        updated: readFrontmatterField(fm, 'updated') || '',
+        mtime: stats.mtime.toISOString(),
+      });
+    }
+  }
 }
 
 function resolveKnowledgeContext({ rootDir, knowledgeRoot } = {}) {
@@ -796,6 +868,58 @@ function formatRefreshOutput(result) {
   ].join('\n');
 }
 
+function formatPromoteOutput(result) {
+  return [
+    '已晋升知识条目：',
+    `- ${result.source} -> ${result.target} | status: confirmed`,
+  ].join('\n');
+}
+
+function formatPendingOutput(items) {
+  const lines = ['待确认知识清单（inbox）：'];
+  if (items.length === 0) {
+    lines.push('- 无');
+    return lines.join('\n');
+  }
+
+  for (const item of items) {
+    const type = item.type || '-';
+    const updated = item.updated || '-';
+    lines.push(`- ${item.relativePath} | status: ${item.status} | type: ${type} | updated: ${updated}`);
+  }
+
+  return lines.join('\n');
+}
+
+// 机读输出：将检索结果整理为结构化对象，便于 OpenCode/Codex 自动化管线消费。
+function resultToJson(command, query, results) {
+  const keywords = extractKeywords(query);
+  return {
+    command,
+    query,
+    keywords,
+    results: results.map((result) => ({
+      repositoryPath: result.repositoryPath,
+      relativePath: result.relativePath,
+      title: result.title,
+      score: result.score,
+      mustRead: result.score >= 8 && result.relativePath.startsWith('knowledge/'),
+      pending: result.pending,
+      hits: result.hits,
+      coverage: result.coverage,
+      matched: result.matched,
+      total: result.total,
+      stale: result.stale,
+      staleReason: result.staleReason,
+      snippet: result.snippet,
+    })),
+  };
+}
+
+function staleToJson(result) {
+  return { command: 'check-stale', ...result };
+}
+
 function usage() {
   return [
     '用法：agent-knowledge <command> [args]',
@@ -807,10 +931,13 @@ function usage() {
     '  record-fix --type <bug|prd|tech> --title <title> 记录修复经验',
     '  check-stale --project-root <path> --knowledge-file <path> [--deep] 检查知识条目是否落后于项目 HEAD（--deep 比对 evidence_files）',
     '  refresh-project --project-root <path> --knowledge-file <path> [--summary <text>] 刷新项目知识元数据',
+    '  promote --file <path>                           将 inbox 待确认条目晋升到 knowledge（status 改为 confirmed）',
+    '  list-pending                                    列出 inbox 下所有待确认条目',
     '',
     '选项：',
     '  --knowledge-root <path>                         使用分离的私有知识库根目录',
     '  AGENT_KNOWLEDGE_ROOT                            未传参数时使用的知识库根目录环境变量',
+    '  --json                                          以 JSON 形式输出，便于自动化管线消费',
     '  --help                                          显示帮助',
   ].join('\n');
 }
@@ -830,7 +957,11 @@ async function main(argv) {
       query,
       knowledgeRoot: globalOptions.knowledgeRoot,
     });
-    console.log(formatSearchOutput(query, results));
+    if (globalOptions.json) {
+      console.log(JSON.stringify(resultToJson('search', query, results), null, 2));
+    } else {
+      console.log(formatSearchOutput(query, results));
+    }
     return 0;
   }
 
@@ -840,7 +971,11 @@ async function main(argv) {
       query,
       knowledgeRoot: globalOptions.knowledgeRoot,
     });
-    console.log(formatBeforeTaskOutput(query, results));
+    if (globalOptions.json) {
+      console.log(JSON.stringify(resultToJson('before-task', query, results), null, 2));
+    } else {
+      console.log(formatBeforeTaskOutput(query, results));
+    }
     return 0;
   }
 
@@ -875,7 +1010,29 @@ async function main(argv) {
       deep: options.deep,
       knowledgeRoot: globalOptions.knowledgeRoot,
     });
-    console.log(formatStaleOutput(result));
+    if (globalOptions.json) {
+      console.log(JSON.stringify(staleToJson(result), null, 2));
+    } else {
+      console.log(formatStaleOutput(result));
+    }
+    return 0;
+  }
+
+  if (command === 'promote') {
+    const options = parseOptions(globalOptions.args);
+    const result = await promote({
+      file: options.file,
+      knowledgeRoot: globalOptions.knowledgeRoot,
+    });
+    console.log(formatPromoteOutput(result));
+    return 0;
+  }
+
+  if (command === 'list-pending') {
+    const items = await listPending({
+      knowledgeRoot: globalOptions.knowledgeRoot,
+    });
+    console.log(formatPendingOutput(items));
     return 0;
   }
 
@@ -900,11 +1057,14 @@ function parseGlobalOptions(args) {
   const options = {
     args: remainingArgs,
     knowledgeRoot: '',
+    json: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg.startsWith('--knowledge-root=')) {
+    if (arg === '--json') {
+      options.json = true;
+    } else if (arg.startsWith('--knowledge-root=')) {
       options.knowledgeRoot = arg.slice('--knowledge-root='.length);
     } else if (arg === '--knowledge-root') {
       options.knowledgeRoot = args[index + 1] ?? '';
@@ -945,6 +1105,11 @@ function parseOptions(args) {
       options.knowledgeFile = arg.slice('--knowledge-file='.length);
     } else if (arg === '--knowledge-file') {
       options.knowledgeFile = args[index + 1];
+      index += 1;
+    } else if (arg.startsWith('--file=')) {
+      options.file = arg.slice('--file='.length);
+    } else if (arg === '--file') {
+      options.file = args[index + 1];
       index += 1;
     } else if (arg.startsWith('--summary=')) {
       options.summary = arg.slice('--summary='.length);
