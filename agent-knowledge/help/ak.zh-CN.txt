@@ -19,23 +19,27 @@ ak check --help
 
 命令总览：
 
-| 命令 | 作用 | 是否写文件 |
-| --- | --- | --- |
-| `ak task <任务描述>` | 任务开始前检索相关知识 | 否 |
-| `ak search <关键词>` | 主动搜索知识库 | 否 |
-| `ak projects` | 列出知识库项目索引中的项目 | 否 |
-| `ak check <项目名>` | 检查项目知识文件是否落后于项目当前 HEAD | 否 |
-| `ak refresh <项目名> [说明]` | 刷新项目知识文件的元数据和刷新记录 | 是 |
-| `ak bug <标题> [--target <文件>]` | 记录 BUG 纠错到 inbox | 是 |
-| `ak prd <标题> [--target <文件>]` | 记录 PRD 纠偏到 inbox | 是 |
-| `ak tech <标题> [--target <文件>]` | 记录技术方案纠偏到 inbox | 是 |
-| `ak resolve <文件> [--confirm-legacy]` | 确认 targeted fix 已合入目标并归档审计 | 是 |
-| `ak rule <规则标题> [--confirmed]` | 新增规则草稿或确认规则 | 是 |
-| `ak promote <inbox文件>` | 晋升普通草稿或不带 target 的独立 fix | 是 |
-| `ak pending` | 列出 inbox 下待确认条目 | 否 |
-| `ak adapters [--check]` | 同步或只读检查 OpenCode 命令适配器 | `--check` 时否，否则是 |
-| `ak doctor [--json]` | 检查知识库结构、引用、证据和适配器漂移 | 否 |
-| `ak raw <原始参数>` | 透传到底层 `agent-knowledge` CLI | 取决于原始命令 |
+以下结构化命令区块由命令契约自动生成，请勿手工修改。
+
+<!-- BEGIN GENERATED: AK_COMMAND_TABLE -->
+| 短命令 | 作用 |
+| --- | --- |
+| `ak task <任务描述>` | 任务开始前检索相关知识 |
+| `ak search <关键词>` | 主动搜索知识库 |
+| `ak projects` | 列出知识库项目索引中的项目 |
+| `ak check <项目名>` | 检查项目知识文件是否落后于项目当前 HEAD |
+| `ak refresh <项目名> [说明]` | 刷新项目知识文件的元数据和刷新记录 |
+| `ak bug <标题> [--target <文件>]` | 记录 BUG 纠错到 inbox |
+| `ak prd <标题> [--target <文件>]` | 记录 PRD 纠偏到 inbox |
+| `ak tech <标题> [--target <文件>]` | 记录技术方案纠偏到 inbox |
+| `ak rule <规则标题> [--confirmed]` | 新增规则草稿或确认规则 |
+| `ak promote <inbox文件>` | 晋升普通草稿或不带 target 的独立 fix |
+| `ak resolve <文件> [--confirm-legacy]` | 确认 targeted fix 已合入目标并归档审计 |
+| `ak pending` | 列出 inbox 下待确认条目 |
+| `ak adapters [--check]` | 同步或只读检查 OpenCode 命令适配器 |
+| `ak doctor [--json]` | 检查知识库结构、引用、证据和适配器漂移 |
+| `ak raw <原始参数>` | 透传到底层 agent-knowledge CLI |
+<!-- END GENERATED: AK_COMMAND_TABLE -->
 
 以下只读命令支持 `--json`：
 

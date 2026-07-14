@@ -66,23 +66,27 @@ node agent-knowledge/bin/agent-knowledge.js search "graph-service 项目职责"
 
 日常使用优先使用短命令 `ak`：
 
-| 短命令 | 等价动作 |
+以下结构化命令区块由命令契约自动生成，请勿手工修改。
+
+<!-- BEGIN GENERATED: AK_COMMAND_TABLE -->
+| 短命令 | 作用 |
 | --- | --- |
-| `ak task <任务描述>` | `before-task <任务描述>` |
-| `ak search <关键词>` | `search <关键词>` |
-| `ak projects` | 列出知识库项目索引里的项目 |
-| `ak check <项目名>` | 自动解析项目路径和知识文件后执行 `check-stale` |
-| `ak refresh <项目名> [说明]` | 自动解析项目路径和知识文件后执行 `refresh-project` |
-| `ak bug <标题> [--target <文件>]` | `record-fix --type bug --title <标题> [--target <文件>]` |
-| `ak prd <标题> [--target <文件>]` | `record-fix --type prd --title <标题> [--target <文件>]` |
-| `ak tech <标题> [--target <文件>]` | `record-fix --type tech --title <标题> [--target <文件>]` |
-| `ak resolve <文件> [--confirm-legacy]` | 关闭已由目标正式知识吸收的 targeted fix，并生成归档审计工件 |
-| `ak rule <规则标题> [--confirmed]` | `add-rule <规则标题> [--confirmed]` |
-| `ak promote <文件>` | 晋升普通草稿或不带 `target` 的独立 fix；targeted fix 会被拒绝 |
-| `ak pending` | 列出 inbox 下所有待确认条目 |
+| `ak task <任务描述>` | 任务开始前检索相关知识 |
+| `ak search <关键词>` | 主动搜索知识库 |
+| `ak projects` | 列出知识库项目索引中的项目 |
+| `ak check <项目名>` | 检查项目知识文件是否落后于项目当前 HEAD |
+| `ak refresh <项目名> [说明]` | 刷新项目知识文件的元数据和刷新记录 |
+| `ak bug <标题> [--target <文件>]` | 记录 BUG 纠错到 inbox |
+| `ak prd <标题> [--target <文件>]` | 记录 PRD 纠偏到 inbox |
+| `ak tech <标题> [--target <文件>]` | 记录技术方案纠偏到 inbox |
+| `ak rule <规则标题> [--confirmed]` | 新增规则草稿或确认规则 |
+| `ak promote <inbox文件>` | 晋升普通草稿或不带 target 的独立 fix |
+| `ak resolve <文件> [--confirm-legacy]` | 确认 targeted fix 已合入目标并归档审计 |
+| `ak pending` | 列出 inbox 下待确认条目 |
 | `ak adapters [--check]` | 同步或只读检查 OpenCode 命令适配器 |
-| `ak doctor [--json]` | 只读检查知识库结构、引用、证据、锁和适配器漂移 |
-| `ak raw <原始参数>` | 透传到底层 `agent-knowledge` CLI |
+| `ak doctor [--json]` | 检查知识库结构、引用、证据和适配器漂移 |
+| `ak raw <原始参数>` | 透传到底层 agent-knowledge CLI |
+<!-- END GENERATED: AK_COMMAND_TABLE -->
 
 每条短命令都可以直接查看详细说明：
 
@@ -92,21 +96,22 @@ ak help refresh
 ak bug --help
 ```
 
+<!-- BEGIN GENERATED: CLI_COMMAND_TABLE -->
 | 命令 | 什么时候用 | 是否写文件 |
 | --- | --- | --- |
-| `before-task <任务描述>` | Codex / Claude / OpenCode 开始分析需求、BUG 或技术方案前调用 | 否 |
-| `search <关键词>` | 临时查找某条规则、服务关系、历史坑或项目说明 | 否 |
-| `add-rule <规则标题>` | 人工发现一条“不成文规则”，先进入待确认区 | 是，写入 `inbox/rules/` |
-| `add-rule <规则标题> --confirmed` | 规则已经由代码、线上问题或团队共识确认 | 是，写入 `knowledge/rules/` |
-| `record-fix --type <bug\|prd\|tech> --title <标题> [--target <文件>]` | 为正式知识创建 targeted fix，或记录没有对应知识文件的独立纠偏 | 是，写入对应 `inbox/` 目录 |
-| `resolve-fix --file <文件> [--confirm-legacy]` | 校验 targeted fix 的目标已变化并归档 source、snapshot 和 resolved 审计记录 | 是，写入 `archive/` 和 `work/`，移除原 inbox source |
-| `check-stale --project-root <项目路径> --knowledge-file <知识文件> [--deep]` | 检查某个项目说明是否落后于项目当前 Git HEAD；`--deep` 精确比对 `evidence_files` | 否 |
-| `refresh-project --project-root <项目路径> --knowledge-file <知识文件>` | 人工或 AI 已核对正文后，刷新项目知识元数据 | 是，更新指定知识文件 |
-| `promote --file <文件路径>` | 晋升普通草稿或不带 `target` 的独立 fix；拒绝 targeted fix | 是，移动并重写 frontmatter |
-| `list-pending` | 列出 inbox 下所有待确认条目及 status / 类型 / 更新时间 | 否 |
-| `sync-adapters [--check]` | 同步 OpenCode 命令适配器，或只读检查模板漂移 | 仅非 `--check` 模式写文件 |
-| `doctor [--json]` | 只读检查知识正文、targeted fix 元数据、锁和适配器漂移 | 否 |
-| `before-task`、`search`、`check-stale`、`doctor` 支持 `--json` | 以 JSON 输出结构化结果，便于自动化管线消费 | 否 |
+| `before-task <text>` | 输出任务前知识提示 | 否 |
+| `search <text>` | 搜索知识库 | 否 |
+| `add-rule <title> [--confirmed]` | 新增规则草稿或确认规则 | 是 |
+| `record-fix --type <bug\|prd\|tech> --title <title> [--target <path>]` | 记录修复经验 | 是 |
+| `check-stale --project-root <path> --knowledge-file <path> [--deep]` | 检查知识条目是否落后于项目 HEAD（--deep 比对 evidence_files） | 否 |
+| `refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]` | 刷新项目知识元数据 | 是 |
+| `resolve-fix --file <path> [--confirm-legacy]` | 校验 targeted fix 已合并并归档审计工件 | 是 |
+| `promote --file <path>` | 将 inbox 待确认条目晋升到 knowledge（status 改为 confirmed） | 是 |
+| `list-pending` | 列出 inbox 下所有待确认条目 | 否 |
+| `sync-adapters [--check]` | 同步或检查 OpenCode 命令适配器 | 视参数而定 |
+| `doctor [--json]` | 只读检查知识库结构、引用、证据与适配器漂移 | 否 |
+| `sync-command-docs [--check] --repository-root <path>` | 同步或检查生成的命令文档 | 视参数而定 |
+<!-- END GENERATED: CLI_COMMAND_TABLE -->
 
 任务开始前读取知识：
 

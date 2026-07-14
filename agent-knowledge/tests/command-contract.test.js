@@ -51,6 +51,7 @@ const akCommandNames = [
 ];
 
 const cliEntryPath = fileURLToPath(new URL('../bin/agent-knowledge.js', import.meta.url));
+const repositoryRootPath = fileURLToPath(new URL('../../', import.meta.url));
 const blockBegin = '<!-- BEGIN GENERATED: TEST_BLOCK -->';
 const blockEnd = '<!-- END GENERATED: TEST_BLOCK -->';
 
@@ -196,6 +197,12 @@ function runSyncCommandDocs(repositoryRoot, ...args) {
     repositoryRoot,
   ], { encoding: 'utf8' });
 }
+
+test('真实仓库命令文档与命令契约一致', () => {
+  const result = runSyncCommandDocs(repositoryRootPath, '--check');
+
+  assert.equal(result.status, 0, result.stderr);
+});
 
 async function snapshotTree(root) {
   const snapshot = [];

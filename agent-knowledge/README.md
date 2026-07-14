@@ -40,23 +40,27 @@ ak rule --help
 
 短命令清单：
 
+以下结构化命令区块由命令契约自动生成，请勿手工修改。
+
+<!-- BEGIN GENERATED: AK_COMMAND_TABLE -->
 | 短命令 | 作用 |
 | --- | --- |
-| `ak task <任务描述>` | 任务开始前检索知识，等价于 `before-task` |
-| `ak search <关键词>` | 搜索知识库 |
-| `ak projects` | 列出项目索引中已登记的项目 |
-| `ak check <项目名>` | 自动执行项目知识过期检查 |
-| `ak refresh <项目名> [说明]` | 自动刷新项目知识元数据 |
+| `ak task <任务描述>` | 任务开始前检索相关知识 |
+| `ak search <关键词>` | 主动搜索知识库 |
+| `ak projects` | 列出知识库项目索引中的项目 |
+| `ak check <项目名>` | 检查项目知识文件是否落后于项目当前 HEAD |
+| `ak refresh <项目名> [说明]` | 刷新项目知识文件的元数据和刷新记录 |
 | `ak bug <标题> [--target <文件>]` | 记录 BUG 纠错到 inbox |
-| `ak prd <标题> [--target <文件>]` | 记录 PRD 纠错到 inbox |
-| `ak tech <标题> [--target <文件>]` | 记录技术方案纠错到 inbox |
-| `ak resolve <文件> [--confirm-legacy]` | 确认 targeted fix 已由目标正式知识吸收并归档审计 |
+| `ak prd <标题> [--target <文件>]` | 记录 PRD 纠偏到 inbox |
+| `ak tech <标题> [--target <文件>]` | 记录技术方案纠偏到 inbox |
 | `ak rule <规则标题> [--confirmed]` | 新增规则草稿或确认规则 |
-| `ak promote <文件>` | 将普通草稿或不带 target 的独立 fix 晋升到 knowledge |
-| `ak pending` | 列出 inbox 下所有待确认条目 |
+| `ak promote <inbox文件>` | 晋升普通草稿或不带 target 的独立 fix |
+| `ak resolve <文件> [--confirm-legacy]` | 确认 targeted fix 已合入目标并归档审计 |
+| `ak pending` | 列出 inbox 下待确认条目 |
 | `ak adapters [--check]` | 同步或只读检查 OpenCode 命令适配器 |
-| `ak doctor [--json]` | 只读检查知识库健康状态 |
-| `ak raw <原始参数>` | 透传到底层 CLI |
+| `ak doctor [--json]` | 检查知识库结构、引用、证据和适配器漂移 |
+| `ak raw <原始参数>` | 透传到底层 agent-knowledge CLI |
+<!-- END GENERATED: AK_COMMAND_TABLE -->
 
 `ak check <项目名>` 和 `ak refresh <项目名>` 依赖项目知识文件中的 `project_root`，或 `knowledge/service-map/workspace-projects.md` 中的项目路径。真实团队使用时，推荐设置 `AGENT_KNOWLEDGE_ROOT` 或把 `team-agent-knowledge` 与 `agent-knowledge-hook` 放在同一工作区下。
 
@@ -66,19 +70,22 @@ ak rule --help
 
 完整命令清单：
 
+<!-- BEGIN GENERATED: CLI_COMMAND_LIST -->
 ```text
 agent-knowledge before-task <text>
 agent-knowledge search <text>
 agent-knowledge add-rule <title> [--confirmed]
-agent-knowledge record-fix --type <bug|prd|tech> --title <title> [--target <知识文件>]
-agent-knowledge resolve-fix --file <inbox纠偏文件> [--confirm-legacy]
+agent-knowledge record-fix --type <bug|prd|tech> --title <title> [--target <path>]
 agent-knowledge check-stale --project-root <path> --knowledge-file <path> [--deep]
 agent-knowledge refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]
+agent-knowledge resolve-fix --file <path> [--confirm-legacy]
 agent-knowledge promote --file <path>
 agent-knowledge list-pending
-agent-knowledge sync-adapters [--check] [--repository-root <path>]
-agent-knowledge doctor [--json] [--knowledge-root <path>] [--repository-root <path>]
+agent-knowledge sync-adapters [--check]
+agent-knowledge doctor [--json]
+agent-knowledge sync-command-docs [--check] --repository-root <path>
 ```
+<!-- END GENERATED: CLI_COMMAND_LIST -->
 
 通用选项：
 
