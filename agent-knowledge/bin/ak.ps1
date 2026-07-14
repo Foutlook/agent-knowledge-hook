@@ -3,6 +3,165 @@ $ToolRepoRoot = Split-Path -Parent $AgentKnowledgeRoot
 $WorkspaceRoot = Split-Path -Parent $ToolRepoRoot
 $AgentKnowledgeCli = Join-Path $PSScriptRoot "agent-knowledge.js"
 $AkHelpFile = Join-Path $AgentKnowledgeRoot "help\ak.zh-CN.txt"
+$CommandContractFile = Join-Path $AgentKnowledgeRoot "command-contract.json"
+
+function Assert-CommandContractText {
+  param(
+    $Value,
+    [string] $Context,
+    [bool] $AllowEmpty = $false
+  )
+
+  if ($Value -isnot [string]) {
+    throw "$Context must be a string"
+  }
+  if (-not $AllowEmpty -and $Value.Length -eq 0) {
+    throw "$Context must not be empty"
+  }
+  if ($Value -match '[\r\n`]') {
+    throw "$Context must be single-line text without backticks"
+  }
+}
+
+function Assert-CommandContractName {
+  param(
+    [string] $Value,
+    [string] $Context
+  )
+
+  if ($Value -notmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
+    throw "$Context must use lowercase letters, digits, and single hyphen separators"
+  }
+}
+
+function Assert-CommandContractCollection {
+  param(
+    $Commands,
+    [string] $CollectionName,
+    [bool] $IsAkCommand
+  )
+
+  if ($Commands -isnot [System.Array]) {
+    throw "Command contract field $CollectionName must be an array"
+  }
+
+  $ids = @{}
+  $names = @{}
+  for ($index = 0; $index -lt $Commands.Count; $index++) {
+    $command = $Commands[$index]
+    $context = "${CollectionName}[$index]"
+    if ($null -eq $command -or $command -isnot [System.Management.Automation.PSCustomObject]) {
+      throw "$context must be an object"
+    }
+
+    foreach ($field in @("id", "name", "args", "summary")) {
+      $allowEmpty = $field -eq "args"
+      Assert-CommandContractText -Value $command.$field -Context "$context.$field" -AllowEmpty $allowEmpty
+    }
+    Assert-CommandContractName -Value $command.name -Context "$context.name"
+
+    if (@("never", "always", "conditional") -notcontains $command.writeMode) {
+      throw "$context.writeMode must be never, always, or conditional"
+    }
+    if ($command.jsonOutput -isnot [bool]) {
+      throw "$context.jsonOutput must be boolean"
+    }
+    if ($ids.ContainsKey($command.id)) {
+      throw "$context.id duplicates an existing id: $($command.id)"
+    }
+    if ($names.ContainsKey($command.name)) {
+      throw "$context.name duplicates an existing command name: $($command.name)"
+    }
+    $ids[$command.id] = $true
+    $names[$command.name] = $context
+
+    if ($IsAkCommand) {
+      if ($command.aliases -isnot [System.Array]) {
+        throw "$context.aliases must be an array"
+      }
+      for ($aliasIndex = 0; $aliasIndex -lt $command.aliases.Count; $aliasIndex++) {
+        $aliasContext = "$context.aliases[$aliasIndex]"
+        Assert-CommandContractText -Value $command.aliases[$aliasIndex] -Context $aliasContext
+        Assert-CommandContractName -Value $command.aliases[$aliasIndex] -Context $aliasContext
+      }
+      Assert-CommandContractText -Value $command.mapsTo -Context "$context.mapsTo"
+    }
+  }
+}
+
+function Assert-CommandContract {
+  param(
+    $Contract
+  )
+
+  if ($null -eq $Contract -or $Contract -isnot [System.Management.Automation.PSCustomObject]) {
+    throw "Command contract must be an object"
+  }
+  $versionIsNumber = $Contract.version -is [byte] -or
+    $Contract.version -is [int16] -or
+    $Contract.version -is [int32] -or
+    $Contract.version -is [int64] -or
+    $Contract.version -is [single] -or
+    $Contract.version -is [double] -or
+    $Contract.version -is [decimal]
+  if (-not $versionIsNumber -or $Contract.version -ne 1) {
+    throw "Command contract field version must strictly equal 1"
+  }
+
+  Assert-CommandContractCollection -Commands $Contract.cliCommands -CollectionName "cliCommands" -IsAkCommand $false
+  Assert-CommandContractCollection -Commands $Contract.akCommands -CollectionName "akCommands" -IsAkCommand $true
+
+  # PowerShell resolves primary commands and aliases in one namespace, so all route names must be unique.
+  $names = @{}
+  for ($index = 0; $index -lt $Contract.akCommands.Count; $index++) {
+    $names[$Contract.akCommands[$index].name] = "akCommands[$index].name"
+  }
+  $aliases = @{}
+  for ($commandIndex = 0; $commandIndex -lt $Contract.akCommands.Count; $commandIndex++) {
+    $command = $Contract.akCommands[$commandIndex]
+    for ($aliasIndex = 0; $aliasIndex -lt $command.aliases.Count; $aliasIndex++) {
+      $alias = $command.aliases[$aliasIndex]
+      $context = "akCommands[$commandIndex].aliases[$aliasIndex]"
+      if ($names.ContainsKey($alias)) {
+        throw "$context conflicts with primary command $($names[$alias]): $alias"
+      }
+      if ($aliases.ContainsKey($alias)) {
+        throw "$context conflicts with alias $($aliases[$alias]): $alias"
+      }
+      $aliases[$alias] = $context
+    }
+  }
+
+  $cliNames = @{}
+  foreach ($command in $Contract.cliCommands) {
+    $cliNames[$command.name] = $true
+  }
+  $allowedWrappers = @("wrapper:projects", "wrapper:raw")
+  for ($index = 0; $index -lt $Contract.akCommands.Count; $index++) {
+    $mapsTo = $Contract.akCommands[$index].mapsTo
+    if (-not $cliNames.ContainsKey($mapsTo) -and $allowedWrappers -notcontains $mapsTo) {
+      throw "akCommands[$index].mapsTo must reference a registered CLI command or allowed wrapper: $mapsTo"
+    }
+  }
+}
+
+function Read-CommandContract {
+  try {
+    # Windows PowerShell 5.1 has an unstable default code page; decode the contract as strict UTF-8 explicitly.
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $json = [System.IO.File]::ReadAllText($CommandContractFile, $utf8)
+  } catch {
+    throw "Command contract must be valid UTF-8: $($_.Exception.Message)"
+  }
+
+  try {
+    $contract = $json | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    throw "Command contract JSON parsing failed: $($_.Exception.Message)"
+  }
+  Assert-CommandContract $contract
+  return $contract
+}
 
 function Resolve-KnowledgeRoot {
   if ($env:AGENT_KNOWLEDGE_ROOT) {
@@ -18,39 +177,19 @@ function Resolve-KnowledgeRoot {
 }
 
 function Write-Usage {
-  @(
-    "ak: agent-knowledge short commands",
-    "",
-    "Commands:",
-    "  ak task <task text>                    Run before-task knowledge lookup",
-    "  ak search <query>                      Search knowledge base",
-    "  ak projects                            List registered projects",
-    "  ak check <project>                     Check whether project knowledge is stale",
-    "  ak refresh <project> [summary]         Refresh project knowledge metadata",
-    "  ak bug <title> [--target <file>]       Record a bug fix note",
-    "  ak prd <title> [--target <file>]       Record a PRD correction note",
-    "  ak tech <title> [--target <file>]      Record a technical correction note",
-    "  ak rule <title> [--confirmed]          Add a draft or confirmed rule",
-    "  ak promote <file>                      Promote an inbox draft into knowledge/",
-    "  ak resolve <file> [--confirm-legacy]   Resolve a targeted fix into audit archives",
-    "  ak pending                             List pending inbox items",
-    "  ak adapters [--check]                  Sync or check OpenCode command adapters",
-    "  ak doctor [--json]                     Run read-only knowledge health checks",
-    "  ak raw <agent-knowledge args>          Forward args to the base CLI",
-    "",
-    "Options:",
-    "  --json (task/search/check/doctor)      Output JSON for automation pipelines",
-    "",
-    "Examples:",
-    "  ak task `"analyze empty ownerId in entity graph`"",
-    "  ak check poseidon",
-    "  ak refresh poseidon `"sync module changes after merge`"",
-    "  ak bug `"wrong learning report statistics scope`"",
-    "  ak rule `"aggregation APIs must use one consistent entity source`"",
-    "",
-    "Knowledge root:",
-    "  Uses AGENT_KNOWLEDGE_ROOT first; otherwise sibling team-agent-knowledge; otherwise packaged sample knowledge."
-  ) -join [Environment]::NewLine
+  $contract = Read-CommandContract
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add("ak: agent-knowledge short commands")
+  $lines.Add("")
+  $lines.Add("Commands:")
+  foreach ($command in $contract.akCommands) {
+    $renderedCommand = "  ak $($command.name)"
+    if ($command.args) {
+      $renderedCommand += " $($command.args)"
+    }
+    $lines.Add("$renderedCommand  $($command.summary)")
+  }
+  $lines -join [Environment]::NewLine
 }
 
 function Normalize-HelpTopic {

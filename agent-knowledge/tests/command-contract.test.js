@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -51,6 +51,7 @@ const akCommandNames = [
 ];
 
 const cliEntryPath = fileURLToPath(new URL('../bin/agent-knowledge.js', import.meta.url));
+const akEntryPath = fileURLToPath(new URL('../bin/ak.ps1', import.meta.url));
 const repositoryRootPath = fileURLToPath(new URL('../../', import.meta.url));
 const blockBegin = '<!-- BEGIN GENERATED: TEST_BLOCK -->';
 const blockEnd = '<!-- END GENERATED: TEST_BLOCK -->';
@@ -406,6 +407,263 @@ test('路由一致性检查拒绝契约多出的命令', async () => {
     assert.AssertionError,
   );
 });
+
+function countPowerShellStructuralBraces(line) {
+  let depthChange = 0;
+  let quote = '';
+  for (let index = 0; index < line.length; index++) {
+    const character = line[index];
+    if (quote === '"') {
+      if (character === '`') {
+        index++;
+      } else if (character === '"') {
+        quote = '';
+      }
+      continue;
+    }
+    if (quote === "'") {
+      if (character === "'" && line[index + 1] === "'") {
+        index++;
+      } else if (character === "'") {
+        quote = '';
+      }
+      continue;
+    }
+    if (character === '#') {
+      break;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === '{') {
+      depthChange++;
+    } else if (character === '}') {
+      depthChange--;
+    }
+  }
+  return depthChange;
+}
+
+function extractAkCommandRoutes(source) {
+  const lines = source.replaceAll('\r\n', '\n').split('\n');
+  const switchIndex = lines.findIndex((line) => /^\s*switch \(\$command\) \{$/u.test(line));
+  assert.notEqual(switchIndex, -1, '未找到 switch ($command)');
+
+  const routes = [];
+  let depth = 1;
+  let closed = false;
+  for (const line of lines.slice(switchIndex + 1)) {
+    const selector = line.trim();
+    if (depth === 1) {
+      if (!selector || selector.startsWith('#')) {
+        continue;
+      }
+      if (selector === '}') {
+        closed = true;
+      } else if (selector === 'default {') {
+        // default 是控制分支，不属于契约登记的短命令。
+      } else {
+        const stringCase = selector.match(/^"([a-z0-9]+(?:-[a-z0-9]+)*)" \{$/u);
+        const compoundCase = selector.match(/^\{ \$_ -in @\((.+)\) \} \{$/u);
+        if (stringCase) {
+          routes.push(stringCase[1]);
+        } else if (compoundCase) {
+          const list = compoundCase[1];
+          if (!/^"[a-z0-9]+(?:-[a-z0-9]+)*"(?:, "[a-z0-9]+(?:-[a-z0-9]+)*")*$/u.test(list)) {
+            throw new Error(`不支持的 PowerShell switch 复合 case：${selector}`);
+          }
+          routes.push(...JSON.parse(`[${list}]`));
+        } else {
+          throw new Error(`不支持的 PowerShell switch case：${selector}`);
+        }
+      }
+    }
+
+    depth += countPowerShellStructuralBraces(line);
+    if (depth === 0) {
+      break;
+    }
+    assert.ok(depth > 0, 'switch ($command) 花括号不平衡');
+  }
+  assert.equal(closed, true, 'switch ($command) 未闭合');
+  assert.equal(depth, 0, 'switch ($command) 花括号不平衡');
+  return routes;
+}
+
+function akContractRoutes(contract) {
+  return contract.akCommands.flatMap(({ name, aliases }) => [name, ...aliases]);
+}
+
+test('PowerShell 顶层短命令路由与契约主命令及别名双向一致', async () => {
+  const [contract, source] = await Promise.all([
+    loadCommandContract(),
+    readFile(akEntryPath, 'utf8'),
+  ]);
+
+  assertRouteContractEqual(extractAkCommandRoutes(source), akContractRoutes(contract));
+});
+
+test('PowerShell 路由一致性检查拒绝源码多出的短命令', async () => {
+  const [contract, source] = await Promise.all([
+    loadCommandContract(),
+    readFile(akEntryPath, 'utf8'),
+  ]);
+  const newline = source.includes('\r\n') ? '\r\n' : '\n';
+  const sourceWithExtraRoute = source.replace(
+    /(?=    default \{\r?\n      Write-Error "Unknown ak command: \$command")/u,
+    `    "extra" {${newline}      exit 0${newline}    }${newline}`,
+  );
+
+  assert.throws(
+    () => assertRouteContractEqual(extractAkCommandRoutes(sourceWithExtraRoute), akContractRoutes(contract)),
+    assert.AssertionError,
+  );
+});
+
+test('PowerShell 路由一致性检查拒绝契约多出的短命令', async () => {
+  const [contract, source] = await Promise.all([
+    loadCommandContract(),
+    readFile(akEntryPath, 'utf8'),
+  ]);
+
+  assert.throws(
+    () => assertRouteContractEqual(
+      extractAkCommandRoutes(source),
+      [...akContractRoutes(contract), 'contract-only'],
+    ),
+    assert.AssertionError,
+  );
+});
+
+test('PowerShell 路由提取器拒绝未知 case 写法', async () => {
+  const source = await readFile(akEntryPath, 'utf8');
+  const sourceWithUnknownCase = source.replace('    "projects" {', '    /^projects$/ {');
+
+  assert.throws(() => extractAkCommandRoutes(sourceWithUnknownCase), /不支持.*case/u);
+});
+
+async function createPowerShellTool(t, contract = createValidContract()) {
+  const toolRoot = await mkdtemp(path.join(tmpdir(), 'agent-knowledge-powershell-help-'));
+  t.after(() => rm(toolRoot, { recursive: true, force: true }));
+  const binRoot = path.join(toolRoot, 'bin');
+  await mkdir(binRoot, { recursive: true });
+  const scriptPath = path.join(binRoot, 'ak.ps1');
+  const contractPath = path.join(toolRoot, 'command-contract.json');
+  await Promise.all([
+    copyFile(akEntryPath, scriptPath),
+    writeFile(contractPath, `${JSON.stringify(contract, null, 2)}\n`, 'utf8'),
+  ]);
+  return { contractPath, scriptPath };
+}
+
+function runPowerShellAkHelp(scriptPath) {
+  const escapedScriptPath = scriptPath.replaceAll("'", "''");
+  return spawnSync('powershell', [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    `[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false); & '${escapedScriptPath}' help`,
+  ], { encoding: 'utf8' });
+}
+
+test('PowerShell 缺少详细帮助时按契约顺序输出主命令及中文 summary', async (t) => {
+  const contract = await loadCommandContract();
+  const { scriptPath } = await createPowerShellTool(t, contract);
+
+  const result = runPowerShellAkHelp(scriptPath);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.replaceAll('\r\n', '\n').trimEnd(), renderAkBasicUsage(contract));
+  for (const { aliases } of contract.akCommands) {
+    for (const alias of aliases) {
+      assert.doesNotMatch(result.stdout, new RegExp(`^  ak ${alias}(?: |$)`, 'mu'));
+    }
+  }
+});
+
+test('PowerShell 基础帮助严格拒绝非法 UTF-8 契约', async (t) => {
+  const { contractPath, scriptPath } = await createPowerShellTool(t);
+  await writeFile(contractPath, Buffer.from([0x7b, 0x22, 0x80, 0x22, 0x3a, 0x31, 0x7d]));
+
+  const result = runPowerShellAkHelp(scriptPath);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /UTF-8/u);
+  assert.doesNotMatch(result.stdout, /Commands:/u);
+});
+
+const invalidPowerShellContractCases = [
+  {
+    name: '未知版本',
+    mutate(contract) { contract.version = 2; },
+    error: /version/u,
+  },
+  {
+    name: '重复 CLI 名称',
+    mutate(contract) {
+      contract.cliCommands.push({ ...contract.cliCommands[0], id: 'other-command' });
+    },
+    error: /cliCommands\[1\]\.name/u,
+  },
+  {
+    name: 'ak 别名与主命令冲突',
+    mutate(contract) {
+      contract.akCommands.push({
+        ...contract.akCommands[0],
+        id: 'other',
+        name: 'other',
+        aliases: ['short'],
+      });
+    },
+    error: /akCommands\[1\]\.aliases\[0\]/u,
+  },
+  {
+    name: '重复 ak 别名',
+    mutate(contract) {
+      contract.akCommands.push({
+        ...contract.akCommands[0],
+        id: 'other',
+        name: 'other',
+        aliases: ['s'],
+      });
+    },
+    error: /akCommands\[1\]\.aliases\[0\]/u,
+  },
+  {
+    name: '非法 writeMode',
+    mutate(contract) { contract.cliCommands[0].writeMode = 'sometimes'; },
+    error: /cliCommands\[0\]\.writeMode/u,
+  },
+  {
+    name: '非布尔 jsonOutput',
+    mutate(contract) { contract.akCommands[0].jsonOutput = 'false'; },
+    error: /akCommands\[0\]\.jsonOutput/u,
+  },
+  {
+    name: '未知 CLI mapsTo',
+    mutate(contract) { contract.akCommands[0].mapsTo = 'missing-command'; },
+    error: /akCommands\[0\]\.mapsTo/u,
+  },
+  {
+    name: '非白名单 wrapper',
+    mutate(contract) { contract.akCommands[0].mapsTo = 'wrapper:other'; },
+    error: /akCommands\[0\]\.mapsTo/u,
+  },
+];
+
+for (const { name, mutate, error } of invalidPowerShellContractCases) {
+  test(`PowerShell 基础帮助拒绝${name}`, async (t) => {
+    const contract = createValidContract();
+    mutate(contract);
+    const { scriptPath } = await createPowerShellTool(t, contract);
+
+    const result = runPowerShellAkHelp(scriptPath);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, error);
+    assert.doesNotMatch(result.stdout, /Commands:/u);
+  });
+}
 
 test('真实命令契约按登记顺序加载', async () => {
   const contract = await loadCommandContract();
