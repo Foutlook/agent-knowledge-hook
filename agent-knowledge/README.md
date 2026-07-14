@@ -72,11 +72,11 @@ ak rule --help
 
 <!-- BEGIN GENERATED: CLI_COMMAND_LIST -->
 ```text
-agent-knowledge before-task <text>
-agent-knowledge search <text>
+agent-knowledge before-task <text> [--json]
+agent-knowledge search <text> [--json]
 agent-knowledge add-rule <title> [--confirmed]
 agent-knowledge record-fix --type <bug|prd|tech> --title <title> [--target <path>]
-agent-knowledge check-stale --project-root <path> --knowledge-file <path> [--deep]
+agent-knowledge check-stale --project-root <path> --knowledge-file <path> [--deep] [--json]
 agent-knowledge refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]
 agent-knowledge resolve-fix --file <path> [--confirm-legacy]
 agent-knowledge promote --file <path>
@@ -97,7 +97,7 @@ agent-knowledge sync-command-docs [--check] --repository-root <path>
 
 如果没有传 `--knowledge-root`，命令会优先读取环境变量 `AGENT_KNOWLEDGE_ROOT`；如果环境变量也不存在，则使用当前工具目录内置的示例知识库。
 
-`--json` 可用于 `before-task`、`search`、`check-stale` 与 `doctor`。其中 `doctor --json` 无论检查通过还是发现 error，都会在 stdout 输出唯一的合法 JSON 对象，便于自动化管线直接解析。
+命令是否支持 `--json` 由统一命令契约维护，以本页上方生成命令清单中的 `[--json]` 标记为准。其中 `doctor --json` 无论检查通过还是发现 error，都会在 stdout 输出唯一的合法 JSON 对象，便于自动化管线直接解析。
 
 ## 命令使用姿势
 
@@ -316,7 +316,7 @@ ak doctor --json
 
 ### --json
 
-`before-task`、`search`、`check-stale`、`doctor` 支持 `--json`，输出结构化结果：
+支持 `[--json]` 的命令以本页上方生成命令清单为准，启用后输出结构化结果：
 
 ```powershell
 agent-knowledge search "graph-service 实体归属" --json
@@ -478,7 +478,7 @@ node agent-knowledge\bin\agent-knowledge.js search "RPC 本地依赖"
 
 ## 本地验证
 
-仓库的 GitHub Actions 会在 `push` 和 `pull_request` 时运行测试、只读检查 OpenCode 适配器漂移，并对仓库打包的示例知识库执行 `doctor`。CI 不安装第三方依赖、不自动同步适配器，也不访问工作区外的私有 `team-agent-knowledge`。
+仓库的 GitHub Actions 会在 `push` 和 `pull_request` 时运行测试、只读检查命令文档与 OpenCode 适配器漂移，并对仓库打包的示例知识库执行 `doctor`。CI 不安装第三方依赖、不自动同步命令文档或适配器，也不访问工作区外的私有 `team-agent-knowledge`。
 
 真实私有知识库只适合在具备访问权限的本地环境中额外执行只读 `doctor`，该结果属于非阻塞的环境检查，不作为跨环境 CI 门禁。
 
@@ -494,7 +494,7 @@ npm.cmd run test
 Pop-Location
 ```
 
-结果：共 145 项测试，144 项通过、0 项失败、1 项跳过。跳过项是 `resolveFix source rejects a symlink` 文件 symlink 拒绝用例，因为 Windows 当前权限不允许创建该测试所需的文件 symlink；其余 144 项均已执行并通过。测试覆盖安全新建与原子更新、OpenCode 适配器同步/漂移检查、`doctor` 结构与引用检查、CLI/PowerShell 参数边界、targeted fix 关闭与中断恢复、JSON 机读输出，以及原有检索、纠错、刷新、晋升和待确认清单流程；验证过程不会污染真实 `agent-knowledge/inbox`。
+结果：全量测试零失败；`resolveFix source rejects a symlink` 文件 symlink 拒绝用例因 Windows 当前权限无法创建测试所需的文件 symlink 而跳过。测试覆盖安全新建与原子更新、命令文档与 OpenCode 适配器同步/漂移检查、`doctor` 结构与引用检查、CLI/PowerShell 参数边界、targeted fix 关闭与中断恢复、JSON 机读输出，以及原有检索、纠错、刷新、晋升和待确认清单流程；验证过程不会污染真实 `agent-knowledge/inbox`。
 
 PowerShell 直接执行 `.ps1` 可能被执行策略拦截，因此本地验证使用 `-ExecutionPolicy Bypass` 显式运行包装器：
 

@@ -97,23 +97,23 @@ ak bug --help
 ```
 
 <!-- BEGIN GENERATED: CLI_COMMAND_TABLE -->
-| 命令 | 什么时候用 | 是否写文件 |
-| --- | --- | --- |
-| `before-task <text>` | 输出任务前知识提示 | 否 |
-| `search <text>` | 搜索知识库 | 否 |
-| `add-rule <title> [--confirmed]` | 新增规则草稿或确认规则 | 是 |
-| `record-fix --type <bug\|prd\|tech> --title <title> [--target <path>]` | 记录修复经验 | 是 |
-| `check-stale --project-root <path> --knowledge-file <path> [--deep]` | 检查知识条目是否落后于项目 HEAD（--deep 比对 evidence_files） | 否 |
-| `refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]` | 刷新项目知识元数据 | 是 |
-| `resolve-fix --file <path> [--confirm-legacy]` | 校验 targeted fix 已合并并归档审计工件 | 是 |
-| `promote --file <path>` | 将 inbox 待确认条目晋升到 knowledge（status 改为 confirmed） | 是 |
-| `list-pending` | 列出 inbox 下所有待确认条目 | 否 |
-| `sync-adapters [--check]` | 同步或检查 OpenCode 命令适配器 | 视参数而定 |
-| `doctor [--json]` | 只读检查知识库结构、引用、证据与适配器漂移 | 否 |
-| `sync-command-docs [--check] --repository-root <path>` | 同步或检查生成的命令文档 | 视参数而定 |
+| 命令 | 什么时候用 | 是否写文件 | JSON 输出 |
+| --- | --- | --- | --- |
+| `before-task <text>` | 输出任务前知识提示 | 否 | 支持 |
+| `search <text>` | 搜索知识库 | 否 | 支持 |
+| `add-rule <title> [--confirmed]` | 新增规则草稿或确认规则 | 是 | 不支持 |
+| `record-fix --type <bug\|prd\|tech> --title <title> [--target <path>]` | 记录修复经验 | 是 | 不支持 |
+| `check-stale --project-root <path> --knowledge-file <path> [--deep]` | 检查知识条目是否落后于项目 HEAD（--deep 比对 evidence_files） | 否 | 支持 |
+| `refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]` | 刷新项目知识元数据 | 是 | 不支持 |
+| `resolve-fix --file <path> [--confirm-legacy]` | 校验 targeted fix 已合并并归档审计工件 | 是 | 不支持 |
+| `promote --file <path>` | 将 inbox 待确认条目晋升到 knowledge（status 改为 confirmed） | 是 | 不支持 |
+| `list-pending` | 列出 inbox 下所有待确认条目 | 否 | 不支持 |
+| `sync-adapters [--check]` | 同步或检查 OpenCode 命令适配器 | 视参数而定 | 不支持 |
+| `doctor [--json]` | 只读检查知识库结构、引用、证据与适配器漂移 | 否 | 支持 |
+| `sync-command-docs [--check] --repository-root <path>` | 同步或检查生成的命令文档 | 视参数而定 | 不支持 |
 <!-- END GENERATED: CLI_COMMAND_TABLE -->
 
-`before-task`、`search`、`check-stale`、`doctor` 支持 `--json`，以 JSON 输出结构化结果，便于自动化管线消费。
+命令是否支持 `--json` 由统一命令契约维护，以本页上方生成表格的“JSON 输出”列为准；支持时会输出结构化结果，便于自动化管线消费。
 
 任务开始前读取知识：
 
@@ -257,6 +257,6 @@ node agent-knowledge/bin/agent-knowledge.js sync-adapters --check --repository-r
 node agent-knowledge/bin/agent-knowledge.js doctor --repository-root .
 ```
 
-GitHub Actions 会在 `push` 和 `pull_request` 时运行同一套测试、只读适配器漂移检查和内置示例知识库 `doctor`。当前测试覆盖检索排序、过期检测、JSON 输出、安全写入、纠错生命周期、targeted fix 关闭与恢复、锁诊断、适配器同步、CLI/PowerShell 参数边界、晋升和待确认清单。
+GitHub Actions 会在 `push` 和 `pull_request` 时运行同一套测试、命令文档漂移门禁、只读适配器漂移检查和内置示例知识库 `doctor`。当前测试覆盖检索排序、过期检测、JSON 输出、安全写入、纠错生命周期、targeted fix 关闭与恢复、锁诊断、适配器同步、CLI/PowerShell 参数边界、晋升和待确认清单。
 
-2026-07-14 Windows PowerShell 验证结果：共 145 项测试，144 项通过、0 项失败、1 项文件 symlink 拒绝用例因当前权限无法创建测试 symlink 而跳过；适配器漂移检查和内置示例知识库 `doctor` 均通过。
+Windows PowerShell 最近一次验证结果为全量测试零失败；其中 1 项文件 symlink 拒绝用例因当前权限无法创建测试 symlink 而跳过。命令文档、适配器漂移检查和内置示例知识库 `doctor` 均纳入验证。

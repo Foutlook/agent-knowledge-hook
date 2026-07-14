@@ -16,6 +16,7 @@ import {
   renderCliCommandList,
   renderCliCommandTable,
   renderCliUsage,
+  readUtf8Strict,
   replaceGeneratedBlock,
 } from '../lib/command-contract.js';
 
@@ -377,7 +378,7 @@ export async function syncCommandDocs({ repositoryRoot, contract, check = false 
     const targetPath = path.join(resolvedRepositoryRoot, ...target.relativePath.split('/'));
     let content;
     try {
-      content = await readFile(targetPath, 'utf8');
+      content = await readUtf8Strict(targetPath);
     } catch (error) {
       throw new Error(`${target.relativePath} 读取失败：${error.message}`);
     }
@@ -408,16 +409,14 @@ export async function syncCommandDocs({ repositoryRoot, contract, check = false 
     return { ok: drift.length === 0, drift, synced: [] };
   }
 
-  const synced = [];
   // 所有文件和五个区块完成预检后才落盘，避免后续标记错误造成部分同步。
   for (const target of preflightTargets) {
     if (target.changedBlocks.length === 0) {
       continue;
     }
     await writeFileAtomic(target.targetPath, target.content);
-    synced.push(target.relativePath);
   }
-  return { ok: true, drift, synced };
+  return { ok: true, drift, synced: drift };
 }
 
 export async function doctor({ repositoryRoot, knowledgeRoot } = {}) {
@@ -2938,11 +2937,11 @@ function usage(contract) {
 }
 
 async function main(argv) {
-  const contract = await loadCommandContract();
   const [command, ...args] = argv;
   const globalOptions = parseGlobalOptions(args);
 
   if (!command || command === '--help' || command === '-h') {
+    const contract = await loadCommandContract();
     console.log(usage(contract));
     return 0;
   }
@@ -3103,6 +3102,7 @@ async function main(argv) {
   }
 
   if (command === 'sync-command-docs') {
+    const contract = await loadCommandContract();
     const options = parseSyncCommandDocsOptions(globalOptions);
     const result = await syncCommandDocs({
       repositoryRoot: options.repositoryRoot,
@@ -3124,11 +3124,12 @@ async function main(argv) {
     if (result.synced.length === 0) {
       console.log('命令文档已是最新，无需写入。');
     } else {
-      console.log(`已同步命令文档：\n${result.synced.map((target) => `- ${target}`).join('\n')}`);
+      console.log(`已同步命令文档：\n${result.synced.map((item) => `- ${item.relativePath} [${item.blockName}]`).join('\n')}`);
     }
     return 0;
   }
 
+  const contract = await loadCommandContract();
   console.error(`未知命令：${command}\n\n${usage(contract)}`);
   return 1;
 }

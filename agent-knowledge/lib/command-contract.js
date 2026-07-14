@@ -71,13 +71,23 @@ export function validateCommandContract(contract) {
 }
 
 export async function loadCommandContract(filePath = defaultContractUrl) {
-  const raw = await readFile(filePath, 'utf8');
+  const raw = await readUtf8Strict(filePath);
   return validateCommandContract(JSON.parse(raw));
+}
+
+export async function readUtf8Strict(filePath) {
+  const bytes = await readFile(filePath);
+  try {
+    // TextDecoder 的 fatal 模式会拒绝非法字节，避免生成 U+FFFD 后继续改写契约或文档。
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new Error(`${filePath} 不是合法 UTF-8：${error.message}`, { cause: error });
+  }
 }
 
 export function renderCliUsage(contract) {
   return contract.cliCommands
-    .map((command) => `  ${renderCommand(command)}  ${command.summary}`)
+    .map((command) => `  ${renderCommand(command, '', true)}  ${command.summary}`)
     .join('\n');
 }
 
@@ -104,10 +114,10 @@ export function renderAkCommandTable(contract) {
 
 export function renderCliCommandTable(contract) {
   return [
-    '| 命令 | 什么时候用 | 是否写文件 |',
-    '| --- | --- | --- |',
+    '| 命令 | 什么时候用 | 是否写文件 | JSON 输出 |',
+    '| --- | --- | --- | --- |',
     ...contract.cliCommands.map((command) => (
-      `| \`${escapeMarkdown(renderCommand(command))}\` | ${escapeMarkdown(command.summary)} | ${writeModeLabels[command.writeMode]} |`
+      `| \`${escapeMarkdown(renderCommand(command))}\` | ${escapeMarkdown(command.summary)} | ${writeModeLabels[command.writeMode]} | ${command.jsonOutput ? '支持' : '不支持'} |`
     )),
   ].join('\n');
 }
@@ -115,13 +125,17 @@ export function renderCliCommandTable(contract) {
 export function renderCliCommandList(contract) {
   return [
     '```text',
-    ...contract.cliCommands.map((command) => renderCommand(command, 'agent-knowledge ')),
+    ...contract.cliCommands.map((command) => renderCommand(command, 'agent-knowledge ', true)),
     '```',
   ].join('\n');
 }
 
-function renderCommand(command, prefix = '') {
-  return `${prefix}${command.name}${command.args ? ` ${command.args}` : ''}`;
+function renderCommand(command, prefix = '', includeJsonOutput = false) {
+  let args = command.args;
+  if (includeJsonOutput && command.jsonOutput && !/(?:^|[\s[])--json(?:[\s\]]|$)/u.test(args)) {
+    args = args ? `${args} [--json]` : '[--json]';
+  }
+  return `${prefix}${command.name}${args ? ` ${args}` : ''}`;
 }
 
 function escapeMarkdown(value) {

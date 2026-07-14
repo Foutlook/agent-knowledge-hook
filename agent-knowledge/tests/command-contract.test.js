@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -54,11 +55,16 @@ const cliEntryPath = fileURLToPath(new URL('../bin/agent-knowledge.js', import.m
 const akEntryPath = fileURLToPath(new URL('../bin/ak.ps1', import.meta.url));
 const repositoryRootPath = fileURLToPath(new URL('../../', import.meta.url));
 const workflowPath = fileURLToPath(new URL('../../.github/workflows/agent-knowledge-ci.yml', import.meta.url));
+const commandContractTestPath = fileURLToPath(import.meta.url);
+const powerShellExecutable = process.platform === 'win32' ? 'powershell' : 'pwsh';
 const blockBegin = '<!-- BEGIN GENERATED: TEST_BLOCK -->';
 const blockEnd = '<!-- END GENERATED: TEST_BLOCK -->';
 
 test('CI 在测试后、适配器检查前只读检查命令文档漂移', async () => {
-  const workflow = await readFile(workflowPath, 'utf8');
+  const [workflow, commandContractTestSource] = await Promise.all([
+    readFile(workflowPath, 'utf8'),
+    readFile(commandContractTestPath, 'utf8'),
+  ]);
   const runTestsIndex = workflow.indexOf('run: npm test');
   const commandDocsCheck = 'run: node bin/agent-knowledge.js sync-command-docs --check --repository-root ..';
   const commandDocsCheckIndex = workflow.indexOf(commandDocsCheck);
@@ -77,6 +83,16 @@ test('CI 在测试后、适配器检查前只读检查命令文档漂移', async
   assert.ok(commandDocsCheckIndex < adaptersCheckIndex, '命令文档漂移检查必须位于适配器检查之前');
   assert.deepEqual(syncCommandDocsRuns, [commandDocsCheck]);
   assert.doesNotMatch(workflow, /--knowledge-root|team-agent-knowledge|AGENT_KNOWLEDGE_ROOT/u);
+  assert.match(
+    commandContractTestSource,
+    /const powerShellExecutable = process\.platform === 'win32' \? 'powershell' : 'pwsh';/u,
+    'PowerShell 子进程必须按运行平台选择可执行文件',
+  );
+  assert.doesNotMatch(
+    commandContractTestSource,
+    /spawnSync\('powershell'/u,
+    'Ubuntu npm test 路径不能硬编码 Windows-only powershell',
+  );
 });
 
 test('生成区块保持 LF 且标记外内容逐字节不变', () => {
@@ -192,8 +208,21 @@ function renderMarkedDocument(source, blocks, contract) {
 async function createCommandDocRepository(t, { currentTargets = [], invalidTarget = '' } = {}) {
   const repositoryRoot = await mkdtemp(path.join(tmpdir(), 'agent-knowledge-command-docs-'));
   t.after(() => rm(repositoryRoot, { recursive: true, force: true }));
-  const contract = await loadCommandContract();
+  const contract = createFormattingContract();
   const files = new Map();
+  const toolRoot = path.join(repositoryRoot, '.tool');
+  const toolBinRoot = path.join(toolRoot, 'bin');
+  const toolLibRoot = path.join(toolRoot, 'lib');
+  await Promise.all([
+    mkdir(toolBinRoot, { recursive: true }),
+    mkdir(toolLibRoot, { recursive: true }),
+  ]);
+  await Promise.all([
+    copyFile(cliEntryPath, path.join(toolBinRoot, 'agent-knowledge.js')),
+    copyFile(fileURLToPath(new URL('../lib/command-contract.js', import.meta.url)), path.join(toolLibRoot, 'command-contract.js')),
+    writeFile(path.join(toolRoot, 'command-contract.json'), `${JSON.stringify(contract, null, 2)}\n`, 'utf8'),
+    writeFile(path.join(toolRoot, 'package.json'), '{"type":"module"}\n', 'utf8'),
+  ]);
 
   for (const target of commandDocTargets) {
     const filePath = path.join(repositoryRoot, ...target.relativePath.split('/'));
@@ -213,8 +242,9 @@ async function createCommandDocRepository(t, { currentTargets = [], invalidTarge
 }
 
 function runSyncCommandDocs(repositoryRoot, ...args) {
+  const localEntryPath = path.join(repositoryRoot, '.tool', 'bin', 'agent-knowledge.js');
   return spawnSync(process.execPath, [
-    cliEntryPath,
+    existsSync(localEntryPath) ? localEntryPath : cliEntryPath,
     'sync-command-docs',
     ...args,
     '--repository-root',
@@ -285,6 +315,8 @@ test('sync-command-docs 只写漂移文件且再次运行不写入', async (t) =
   const first = runSyncCommandDocs(repositoryRoot);
 
   assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /README\.md \[AK_COMMAND_TABLE\]/u);
+  assert.match(first.stdout, /README\.md \[CLI_COMMAND_TABLE\]/u);
   const changedTarget = files.get('README.md');
   assert.equal(
     await readFile(changedTarget.filePath, 'utf8'),
@@ -314,6 +346,23 @@ test('sync-command-docs 只写漂移文件且再次运行不写入', async (t) =
   }
 });
 
+test('sync-command-docs --check 在 jsonOutput 变化后报告对应生成区块漂移', async (t) => {
+  const currentTargets = commandDocTargets.map(({ relativePath }) => relativePath);
+  const { repositoryRoot, contract } = await createCommandDocRepository(t, { currentTargets });
+  contract.cliCommands[0].jsonOutput = false;
+  await writeFile(
+    path.join(repositoryRoot, '.tool', 'command-contract.json'),
+    `${JSON.stringify(contract, null, 2)}\n`,
+    'utf8',
+  );
+
+  const result = runSyncCommandDocs(repositoryRoot, '--check');
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /README\.md \[CLI_COMMAND_TABLE\]/u);
+  assert.match(result.stderr, /agent-knowledge\/README\.md \[CLI_COMMAND_LIST\]/u);
+});
+
 test('sync-command-docs 预检任一非法目标后不发生部分写入', async (t) => {
   const { repositoryRoot } = await createCommandDocRepository(t, {
     invalidTarget: 'agent-knowledge/README.md',
@@ -325,6 +374,36 @@ test('sync-command-docs 预检任一非法目标后不发生部分写入', async
   assert.equal(result.status, 1);
   assert.match(result.stderr, /agent-knowledge\/README\.md.*标记/u);
   assert.deepEqual(await snapshotTree(repositoryRoot), before);
+});
+
+for (const args of [[], ['--check']]) {
+  const mode = args.length === 0 ? '同步' : '检查';
+  test(`sync-command-docs ${mode}严格拒绝标记外非法 UTF-8 且完全不写入`, async (t) => {
+    const { repositoryRoot, files } = await createCommandDocRepository(t);
+    const targetPath = files.get('agent-knowledge/README.md').filePath;
+    const original = await readFile(targetPath);
+    await writeFile(targetPath, Buffer.concat([Buffer.from([0x80]), original]));
+    const before = await snapshotTree(repositoryRoot);
+
+    const result = runSyncCommandDocs(repositoryRoot, ...args);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /agent-knowledge\/README\.md.*UTF-8/u);
+    assert.deepEqual(await snapshotTree(repositoryRoot), before);
+  });
+}
+
+test('Node 严格拒绝命令契约字符串中的非法 UTF-8', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'agent-knowledge-invalid-utf8-contract-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const contractPath = path.join(root, 'command-contract.json');
+  await writeFile(contractPath, Buffer.concat([
+    Buffer.from('{"version":1,"cliCommands":[{"id":"base","name":"base","args":"","summary":"'),
+    Buffer.from([0x80]),
+    Buffer.from('","writeMode":"never","jsonOutput":false}],"akCommands":[]}'),
+  ]));
+
+  await assert.rejects(loadCommandContract(contractPath), /UTF-8/u);
 });
 
 const invalidSyncCommandDocsArgs = [
@@ -370,9 +449,10 @@ function assertRouteContractEqual(actualRoutes, contractRoutes) {
   assert.deepEqual(new Set(actualRoutes), new Set(contractRoutes));
 }
 
-test('CLI 帮助命令顺序来自契约且同步命令只出现一次', async () => {
-  const contract = await loadCommandContract();
-  const result = spawnSync(process.execPath, [cliEntryPath, '--help'], { encoding: 'utf8' });
+test('CLI 帮助命令顺序来自合成契约且命令只出现一次', async (t) => {
+  const contract = createFormattingContract();
+  const { entryPath } = await createMinimalCliTool(t, `${JSON.stringify(contract, null, 2)}\n`);
+  const result = spawnSync(process.execPath, [entryPath, '--help'], { encoding: 'utf8' });
 
   assert.equal(result.status, 0, result.stderr);
   const helpCommands = result.stdout
@@ -380,8 +460,69 @@ test('CLI 帮助命令顺序来自契约且同步命令只出现一次', async (
     .filter((line) => /^  [a-z0-9]/u.test(line))
     .map((line) => line.trimStart().match(/^([a-z0-9-]+)/u)[1]);
   assert.deepEqual(helpCommands, contract.cliCommands.map(({ name }) => name));
-  assert.equal(result.stdout.match(/\bsync-command-docs\b/gu)?.length, 1);
+  for (const { name } of contract.cliCommands) {
+    assert.equal(result.stdout.match(new RegExp(`\\b${name}\\b`, 'gu'))?.length, 1);
+  }
 });
+
+async function createMinimalCliTool(t, contractContent) {
+  const toolRoot = await mkdtemp(path.join(tmpdir(), 'agent-knowledge-lazy-contract-'));
+  t.after(() => rm(toolRoot, { recursive: true, force: true }));
+  const binRoot = path.join(toolRoot, 'bin');
+  const libRoot = path.join(toolRoot, 'lib');
+  const knowledgeRoot = path.join(toolRoot, 'knowledge-root');
+  await Promise.all([
+    mkdir(binRoot, { recursive: true }),
+    mkdir(libRoot, { recursive: true }),
+    mkdir(path.join(knowledgeRoot, 'knowledge'), { recursive: true }),
+  ]);
+  const entryPath = path.join(binRoot, 'agent-knowledge.js');
+  await Promise.all([
+    copyFile(cliEntryPath, entryPath),
+    copyFile(fileURLToPath(new URL('../lib/command-contract.js', import.meta.url)), path.join(libRoot, 'command-contract.js')),
+    writeFile(path.join(toolRoot, 'package.json'), '{"type":"module"}\n', 'utf8'),
+    writeFile(
+      path.join(knowledgeRoot, 'knowledge', 'sample.md'),
+      '---\ntitle: 示例知识\nstatus: confirmed\n---\n\n# 示例知识\n\n唯一检索词。\n',
+      'utf8',
+    ),
+  ]);
+  if (contractContent !== undefined) {
+    await writeFile(path.join(toolRoot, 'command-contract.json'), contractContent, 'utf8');
+  }
+  return { entryPath, knowledgeRoot, toolRoot };
+}
+
+for (const { name, contractContent } of [
+  { name: '缺失', contractContent: undefined },
+  { name: '损坏', contractContent: '{not-json}\n' },
+]) {
+  test(`原只读业务命令不依赖${name}的命令契约，但帮助与同步仍失败`, async (t) => {
+    const { entryPath, knowledgeRoot, toolRoot } = await createMinimalCliTool(t, contractContent);
+
+    const businessResult = spawnSync(process.execPath, [
+      entryPath,
+      'search',
+      '唯一检索词',
+      '--knowledge-root',
+      knowledgeRoot,
+    ], { encoding: 'utf8' });
+    const helpResult = spawnSync(process.execPath, [entryPath, '--help'], { encoding: 'utf8' });
+    const syncResult = spawnSync(process.execPath, [
+      entryPath,
+      'sync-command-docs',
+      '--repository-root',
+      toolRoot,
+    ], { encoding: 'utf8' });
+
+    assert.equal(businessResult.status, 0, businessResult.stderr);
+    assert.match(businessResult.stdout, /唯一检索词/u);
+    assert.equal(helpResult.status, 1);
+    assert.match(helpResult.stderr, /command-contract\.json|JSON/u);
+    assert.equal(syncResult.status, 1);
+    assert.match(syncResult.stderr, /command-contract\.json|JSON/u);
+  });
+}
 
 test('Node 顶层命令路由与契约双向一致', async () => {
   const [contract, source] = await Promise.all([
@@ -580,7 +721,7 @@ async function createPowerShellTool(t, contract = createValidContract()) {
 
 function runPowerShellAkHelp(scriptPath) {
   const escapedScriptPath = scriptPath.replaceAll("'", "''");
-  return spawnSync('powershell', [
+  return spawnSync(powerShellExecutable, [
     '-NoProfile',
     '-ExecutionPolicy',
     'Bypass',
@@ -590,7 +731,7 @@ function runPowerShellAkHelp(scriptPath) {
 }
 
 test('PowerShell 缺少详细帮助时按契约顺序输出主命令及中文 summary', async (t) => {
-  const contract = await loadCommandContract();
+  const contract = createFormattingContract();
   const { scriptPath } = await createPowerShellTool(t, contract);
 
   const result = runPowerShellAkHelp(scriptPath);
@@ -739,114 +880,101 @@ test('真实命令契约按登记顺序加载', async () => {
 });
 
 test('渲染 CLI 帮助命令行', async () => {
-  const contract = await loadCommandContract();
+  const contract = createFormattingContract();
 
   assert.equal(renderCliUsage(contract), [
-    '  before-task <text>  输出任务前知识提示',
-    '  search <text>  搜索知识库',
-    '  add-rule <title> [--confirmed]  新增规则草稿或确认规则',
-    '  record-fix --type <bug|prd|tech> --title <title> [--target <path>]  记录修复经验',
-    '  check-stale --project-root <path> --knowledge-file <path> [--deep]  检查知识条目是否落后于项目 HEAD（--deep 比对 evidence_files）',
-    '  refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]  刷新项目知识元数据',
-    '  resolve-fix --file <path> [--confirm-legacy]  校验 targeted fix 已合并并归档审计工件',
-    '  promote --file <path>  将 inbox 待确认条目晋升到 knowledge（status 改为 confirmed）',
-    '  list-pending  列出 inbox 下所有待确认条目',
-    '  sync-adapters [--check]  同步或检查 OpenCode 命令适配器',
-    '  doctor [--json]  只读检查知识库结构、引用、证据与适配器漂移',
-    '  sync-command-docs [--check] --repository-root <path>  同步或检查生成的命令文档',
+    '  alpha <value|other> [--json]  第一条 | 说明',
+    '  beta [--json]  第二条说明',
+    '  gamma  第三条说明',
   ].join('\n'));
 });
 
 test('渲染 ak 基础使用文本', async () => {
-  const contract = await loadCommandContract();
+  const contract = createFormattingContract();
 
   assert.equal(renderAkBasicUsage(contract), [
     'ak: agent-knowledge short commands',
     '',
     'Commands:',
-    '  ak task <任务描述>  任务开始前检索相关知识',
-    '  ak search <关键词>  主动搜索知识库',
-    '  ak projects  列出知识库项目索引中的项目',
-    '  ak check <项目名>  检查项目知识文件是否落后于项目当前 HEAD',
-    '  ak refresh <项目名> [说明]  刷新项目知识文件的元数据和刷新记录',
-    '  ak bug <标题> [--target <文件>]  记录 BUG 纠错到 inbox',
-    '  ak prd <标题> [--target <文件>]  记录 PRD 纠偏到 inbox',
-    '  ak tech <标题> [--target <文件>]  记录技术方案纠偏到 inbox',
-    '  ak rule <规则标题> [--confirmed]  新增规则草稿或确认规则',
-    '  ak promote <inbox文件>  晋升普通草稿或不带 target 的独立 fix',
-    '  ak resolve <文件> [--confirm-legacy]  确认 targeted fix 已合入目标并归档审计',
-    '  ak pending  列出 inbox 下待确认条目',
-    '  ak adapters [--check]  同步或只读检查 OpenCode 命令适配器',
-    '  ak doctor [--json]  检查知识库结构、引用、证据和适配器漂移',
-    '  ak raw <原始参数>  透传到底层 agent-knowledge CLI',
+    '  ak short <值|其它>  短命令 | 说明',
   ].join('\n'));
 });
 
 test('渲染 ak 命令 Markdown 表格', async () => {
-  const contract = await loadCommandContract();
+  const contract = createFormattingContract();
 
   assert.equal(renderAkCommandTable(contract), [
     '| 短命令 | 作用 |',
     '| --- | --- |',
-    '| `ak task <任务描述>` | 任务开始前检索相关知识 |',
-    '| `ak search <关键词>` | 主动搜索知识库 |',
-    '| `ak projects` | 列出知识库项目索引中的项目 |',
-    '| `ak check <项目名>` | 检查项目知识文件是否落后于项目当前 HEAD |',
-    '| `ak refresh <项目名> [说明]` | 刷新项目知识文件的元数据和刷新记录 |',
-    '| `ak bug <标题> [--target <文件>]` | 记录 BUG 纠错到 inbox |',
-    '| `ak prd <标题> [--target <文件>]` | 记录 PRD 纠偏到 inbox |',
-    '| `ak tech <标题> [--target <文件>]` | 记录技术方案纠偏到 inbox |',
-    '| `ak rule <规则标题> [--confirmed]` | 新增规则草稿或确认规则 |',
-    '| `ak promote <inbox文件>` | 晋升普通草稿或不带 target 的独立 fix |',
-    '| `ak resolve <文件> [--confirm-legacy]` | 确认 targeted fix 已合入目标并归档审计 |',
-    '| `ak pending` | 列出 inbox 下待确认条目 |',
-    '| `ak adapters [--check]` | 同步或只读检查 OpenCode 命令适配器 |',
-    '| `ak doctor [--json]` | 检查知识库结构、引用、证据和适配器漂移 |',
-    '| `ak raw <原始参数>` | 透传到底层 agent-knowledge CLI |',
+    '| `ak short <值\\|其它>` | 短命令 \\| 说明 |',
   ].join('\n'));
 });
 
 test('渲染 CLI 命令 Markdown 表格并转义竖线', async () => {
-  const contract = await loadCommandContract();
+  const contract = createFormattingContract();
 
   assert.equal(renderCliCommandTable(contract), [
-    '| 命令 | 什么时候用 | 是否写文件 |',
-    '| --- | --- | --- |',
-    '| `before-task <text>` | 输出任务前知识提示 | 否 |',
-    '| `search <text>` | 搜索知识库 | 否 |',
-    '| `add-rule <title> [--confirmed]` | 新增规则草稿或确认规则 | 是 |',
-    '| `record-fix --type <bug\\|prd\\|tech> --title <title> [--target <path>]` | 记录修复经验 | 是 |',
-    '| `check-stale --project-root <path> --knowledge-file <path> [--deep]` | 检查知识条目是否落后于项目 HEAD（--deep 比对 evidence_files） | 否 |',
-    '| `refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]` | 刷新项目知识元数据 | 是 |',
-    '| `resolve-fix --file <path> [--confirm-legacy]` | 校验 targeted fix 已合并并归档审计工件 | 是 |',
-    '| `promote --file <path>` | 将 inbox 待确认条目晋升到 knowledge（status 改为 confirmed） | 是 |',
-    '| `list-pending` | 列出 inbox 下所有待确认条目 | 否 |',
-    '| `sync-adapters [--check]` | 同步或检查 OpenCode 命令适配器 | 视参数而定 |',
-    '| `doctor [--json]` | 只读检查知识库结构、引用、证据与适配器漂移 | 否 |',
-    '| `sync-command-docs [--check] --repository-root <path>` | 同步或检查生成的命令文档 | 视参数而定 |',
+    '| 命令 | 什么时候用 | 是否写文件 | JSON 输出 |',
+    '| --- | --- | --- | --- |',
+    '| `alpha <value\\|other>` | 第一条 \\| 说明 | 否 | 支持 |',
+    '| `beta [--json]` | 第二条说明 | 是 | 支持 |',
+    '| `gamma` | 第三条说明 | 视参数而定 | 不支持 |',
   ].join('\n'));
 });
 
 test('渲染 CLI 命令代码清单', async () => {
-  const contract = await loadCommandContract();
+  const contract = createFormattingContract();
 
   assert.equal(renderCliCommandList(contract), [
     '```text',
-    'agent-knowledge before-task <text>',
-    'agent-knowledge search <text>',
-    'agent-knowledge add-rule <title> [--confirmed]',
-    'agent-knowledge record-fix --type <bug|prd|tech> --title <title> [--target <path>]',
-    'agent-knowledge check-stale --project-root <path> --knowledge-file <path> [--deep]',
-    'agent-knowledge refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]',
-    'agent-knowledge resolve-fix --file <path> [--confirm-legacy]',
-    'agent-knowledge promote --file <path>',
-    'agent-knowledge list-pending',
-    'agent-knowledge sync-adapters [--check]',
-    'agent-knowledge doctor [--json]',
-    'agent-knowledge sync-command-docs [--check] --repository-root <path>',
+    'agent-knowledge alpha <value|other> [--json]',
+    'agent-knowledge beta [--json]',
+    'agent-knowledge gamma',
     '```',
   ].join('\n'));
 });
+
+function createFormattingContract() {
+  return {
+    version: 1,
+    cliCommands: [
+      {
+        id: 'alpha',
+        name: 'alpha',
+        args: '<value|other>',
+        summary: '第一条 | 说明',
+        writeMode: 'never',
+        jsonOutput: true,
+      },
+      {
+        id: 'beta',
+        name: 'beta',
+        args: '[--json]',
+        summary: '第二条说明',
+        writeMode: 'always',
+        jsonOutput: true,
+      },
+      {
+        id: 'gamma',
+        name: 'gamma',
+        args: '',
+        summary: '第三条说明',
+        writeMode: 'conditional',
+        jsonOutput: false,
+      },
+    ],
+    akCommands: [{
+      id: 'short',
+      name: 'short',
+      args: '<值|其它>',
+      summary: '短命令 | 说明',
+      writeMode: 'never',
+      jsonOutput: false,
+      aliases: ['s'],
+      mapsTo: 'alpha',
+    }],
+  };
+}
 
 function createValidContract() {
   return {
