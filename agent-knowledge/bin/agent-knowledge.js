@@ -10,6 +10,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import {
+  loadCommandContract,
+  renderAkCommandTable,
+  renderCliCommandList,
+  renderCliCommandTable,
+  renderCliUsage,
+  replaceGeneratedBlock,
+} from '../lib/command-contract.js';
+
 const STOP_WORDS = new Set([
   'a',
   'an',
@@ -62,6 +71,28 @@ let temporaryFileSequence = 0;
 const ADAPTER_SPECS = Object.freeze([
   Object.freeze({ fileName: 'knowledge.before-task.md' }),
   Object.freeze({ fileName: 'knowledge.record-fix.md' }),
+]);
+const COMMAND_DOC_TARGETS = Object.freeze([
+  Object.freeze({
+    relativePath: 'README.md',
+    blocks: Object.freeze([
+      Object.freeze({ name: 'AK_COMMAND_TABLE', render: renderAkCommandTable }),
+      Object.freeze({ name: 'CLI_COMMAND_TABLE', render: renderCliCommandTable }),
+    ]),
+  }),
+  Object.freeze({
+    relativePath: 'agent-knowledge/README.md',
+    blocks: Object.freeze([
+      Object.freeze({ name: 'AK_COMMAND_TABLE', render: renderAkCommandTable }),
+      Object.freeze({ name: 'CLI_COMMAND_LIST', render: renderCliCommandList }),
+    ]),
+  }),
+  Object.freeze({
+    relativePath: 'agent-knowledge/help/ak.zh-CN.txt',
+    blocks: Object.freeze([
+      Object.freeze({ name: 'AK_COMMAND_TABLE', render: renderAkCommandTable }),
+    ]),
+  }),
 ]);
 
 // --- 同义词 / 别名映射（增强召回） ---
@@ -336,6 +367,57 @@ export async function syncAdapters({ repositoryRoot, check = false } = {}) {
     issues,
     synced,
   };
+}
+
+export async function syncCommandDocs({ repositoryRoot, contract, check = false } = {}) {
+  const resolvedRepositoryRoot = path.resolve(repositoryRoot);
+  const preflightTargets = [];
+
+  for (const target of COMMAND_DOC_TARGETS) {
+    const targetPath = path.join(resolvedRepositoryRoot, ...target.relativePath.split('/'));
+    let content;
+    try {
+      content = await readFile(targetPath, 'utf8');
+    } catch (error) {
+      throw new Error(`${target.relativePath} 读取失败：${error.message}`);
+    }
+
+    const changedBlocks = [];
+    for (const block of target.blocks) {
+      let replacement;
+      try {
+        replacement = replaceGeneratedBlock(content, block.name, block.render(contract));
+      } catch (error) {
+        throw new Error(`${target.relativePath} [${block.name}] ${error.message}`);
+      }
+      if (replacement.changed) {
+        changedBlocks.push(block.name);
+      }
+      content = replacement.content;
+    }
+    preflightTargets.push({ ...target, targetPath, content, changedBlocks });
+  }
+
+  const drift = preflightTargets.flatMap((target) => (
+    target.changedBlocks.map((blockName) => ({
+      relativePath: target.relativePath,
+      blockName,
+    }))
+  ));
+  if (check) {
+    return { ok: drift.length === 0, drift, synced: [] };
+  }
+
+  const synced = [];
+  // 所有文件和五个区块完成预检后才落盘，避免后续标记错误造成部分同步。
+  for (const target of preflightTargets) {
+    if (target.changedBlocks.length === 0) {
+      continue;
+    }
+    await writeFileAtomic(target.targetPath, target.content);
+    synced.push(target.relativePath);
+  }
+  return { ok: true, drift, synced };
 }
 
 export async function doctor({ repositoryRoot, knowledgeRoot } = {}) {
@@ -2839,22 +2921,12 @@ function staleToJson(result) {
   return { command: 'check-stale', ...result };
 }
 
-function usage() {
+function usage(contract) {
   return [
     '用法：agent-knowledge <command> [args]',
     '',
     '命令：',
-    '  before-task <text>                              输出任务前知识提示',
-    '  search <text>                                   搜索知识库',
-    '  add-rule <title> [--confirmed]                  新增规则草稿或确认规则',
-    '  record-fix --type <bug|prd|tech> --title <title> [--target <path>] 记录修复经验',
-    '  check-stale --project-root <path> --knowledge-file <path> [--deep] 检查知识条目是否落后于项目 HEAD（--deep 比对 evidence_files）',
-    '  refresh-project --project-root <path> --knowledge-file <path> [--summary <text>] 刷新项目知识元数据',
-    '  resolve-fix --file <path> [--confirm-legacy]  校验 targeted fix 已合并并归档审计工件',
-    '  promote --file <path>                           将 inbox 待确认条目晋升到 knowledge（status 改为 confirmed）',
-    '  list-pending                                    列出 inbox 下所有待确认条目',
-    '  sync-adapters [--check]                         同步或检查 OpenCode 命令适配器',
-    '  doctor [--json]                                 只读检查知识库结构、引用、证据与适配器漂移',
+    renderCliUsage(contract),
     '',
     '选项：',
     '  --knowledge-root <path>                         使用分离的私有知识库根目录',
@@ -2866,11 +2938,12 @@ function usage() {
 }
 
 async function main(argv) {
+  const contract = await loadCommandContract();
   const [command, ...args] = argv;
   const globalOptions = parseGlobalOptions(args);
 
   if (!command || command === '--help' || command === '-h') {
-    console.log(usage());
+    console.log(usage(contract));
     return 0;
   }
 
@@ -3029,7 +3102,34 @@ async function main(argv) {
     return 0;
   }
 
-  console.error(`未知命令：${command}\n\n${usage()}`);
+  if (command === 'sync-command-docs') {
+    const options = parseSyncCommandDocsOptions(globalOptions);
+    const result = await syncCommandDocs({
+      repositoryRoot: options.repositoryRoot,
+      contract,
+      check: options.check,
+    });
+    if (options.check) {
+      if (result.ok) {
+        console.log('命令文档检查通过：未发现漂移。');
+        return 0;
+      }
+      console.error('命令文档检查失败：');
+      for (const item of result.drift) {
+        console.error(`- ${item.relativePath} [${item.blockName}]`);
+      }
+      return 1;
+    }
+
+    if (result.synced.length === 0) {
+      console.log('命令文档已是最新，无需写入。');
+    } else {
+      console.log(`已同步命令文档：\n${result.synced.map((target) => `- ${target}`).join('\n')}`);
+    }
+    return 0;
+  }
+
+  console.error(`未知命令：${command}\n\n${usage(contract)}`);
   return 1;
 }
 
@@ -3106,6 +3206,38 @@ function parseGlobalOptions(args) {
   }
 
   return options;
+}
+
+function parseSyncCommandDocsOptions(globalOptions) {
+  const occurrences = globalOptions.globalOptionOccurrences;
+  if (occurrences.repositoryRoot.length === 0) {
+    throw new Error('sync-command-docs 需要且只允许一个 --repository-root <path>');
+  }
+  if (occurrences.repositoryRoot.length > 1) {
+    throw new Error('sync-command-docs --repository-root 只能提供一次');
+  }
+  if (occurrences.knowledgeRoot.length > 0) {
+    throw new Error('sync-command-docs 不接受 --knowledge-root');
+  }
+  if (occurrences.json.length > 0) {
+    throw new Error('sync-command-docs 不接受 --json');
+  }
+
+  let check = false;
+  for (const arg of globalOptions.args) {
+    if (arg === '--check') {
+      if (check) {
+        throw new Error('sync-command-docs --check 最多只能提供一次');
+      }
+      check = true;
+    } else if (arg.startsWith('--')) {
+      throw new Error(`sync-command-docs 不接受未知参数：${arg}`);
+    } else {
+      throw new Error(`sync-command-docs 不接受位置参数：${arg || '(empty)'}`);
+    }
+  }
+
+  return { check, repositoryRoot: globalOptions.repositoryRoot };
 }
 
 function parseOptions(args) {

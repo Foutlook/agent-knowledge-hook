@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   loadCommandContract,
@@ -8,6 +13,7 @@ import {
   renderCliCommandList,
   renderCliCommandTable,
   renderCliUsage,
+  replaceGeneratedBlock,
   validateCommandContract,
 } from '../lib/command-contract.js';
 
@@ -43,6 +49,462 @@ const akCommandNames = [
   'doctor',
   'raw',
 ];
+
+const cliEntryPath = fileURLToPath(new URL('../bin/agent-knowledge.js', import.meta.url));
+const blockBegin = '<!-- BEGIN GENERATED: TEST_BLOCK -->';
+const blockEnd = '<!-- END GENERATED: TEST_BLOCK -->';
+
+test('生成区块保持 LF 且标记外内容逐字节不变', () => {
+  const source = `前缀\n${blockBegin}\n旧内容\n${blockEnd}\n后缀\n`;
+
+  assert.deepEqual(replaceGeneratedBlock(source, 'TEST_BLOCK', '第一行\n第二行'), {
+    content: `前缀\n${blockBegin}\n第一行\n第二行\n${blockEnd}\n后缀\n`,
+    changed: true,
+  });
+});
+
+test('生成区块保持 CRLF', () => {
+  const source = `前缀\r\n${blockBegin}\r\n旧内容\r\n${blockEnd}\r\n后缀\r\n`;
+
+  assert.deepEqual(replaceGeneratedBlock(source, 'TEST_BLOCK', '第一行\n第二行'), {
+    content: `前缀\r\n${blockBegin}\r\n第一行\r\n第二行\r\n${blockEnd}\r\n后缀\r\n`,
+    changed: true,
+  });
+});
+
+test('生成区块重复替换保持字节级幂等', () => {
+  const source = `前缀\n${blockBegin}\n旧内容\n${blockEnd}\n后缀`;
+  const first = replaceGeneratedBlock(source, 'TEST_BLOCK', '新内容');
+  const second = replaceGeneratedBlock(first.content, 'TEST_BLOCK', '新内容');
+
+  assert.equal(second.content, first.content);
+  assert.equal(second.changed, false);
+});
+
+const invalidGeneratedBlockCases = [
+  {
+    name: '拒绝缺失标记',
+    source: '没有生成标记\n',
+    error: /TEST_BLOCK.*缺失/u,
+  },
+  {
+    name: '拒绝重复开始标记',
+    source: `${blockBegin}\n${blockBegin}\n内容\n${blockEnd}\n`,
+    error: /TEST_BLOCK.*重复/u,
+  },
+  {
+    name: '拒绝重复结束标记',
+    source: `${blockBegin}\n内容\n${blockEnd}\n${blockEnd}\n`,
+    error: /TEST_BLOCK.*重复/u,
+  },
+  {
+    name: '拒绝颠倒标记',
+    source: `${blockEnd}\n内容\n${blockBegin}\n`,
+    error: /TEST_BLOCK.*颠倒/u,
+  },
+  {
+    name: '拒绝生成标记嵌套',
+    source: `${blockBegin}\n<!-- BEGIN GENERATED: OTHER_BLOCK -->\n内容\n${blockEnd}\n<!-- END GENERATED: OTHER_BLOCK -->\n`,
+    error: /嵌套/u,
+  },
+  {
+    name: '拒绝混合换行',
+    source: `${blockBegin}\r\n内容\n${blockEnd}\r\n`,
+    error: /混合换行/u,
+  },
+];
+
+for (const { name, source, error } of invalidGeneratedBlockCases) {
+  test(name, () => {
+    assert.throws(() => replaceGeneratedBlock(source, 'TEST_BLOCK', '新内容'), error);
+  });
+}
+
+const commandDocTargets = [
+  {
+    relativePath: 'README.md',
+    blocks: [
+      ['AK_COMMAND_TABLE', renderAkCommandTable],
+      ['CLI_COMMAND_TABLE', renderCliCommandTable],
+    ],
+  },
+  {
+    relativePath: 'agent-knowledge/README.md',
+    blocks: [
+      ['AK_COMMAND_TABLE', renderAkCommandTable],
+      ['CLI_COMMAND_LIST', renderCliCommandList],
+    ],
+  },
+  {
+    relativePath: 'agent-knowledge/help/ak.zh-CN.txt',
+    blocks: [
+      ['AK_COMMAND_TABLE', renderAkCommandTable],
+    ],
+  },
+];
+
+function createMarkedDocument(blocks, content = '旧内容') {
+  return [
+    '标记前内容',
+    ...blocks.flatMap(([blockName]) => [
+      `<!-- BEGIN GENERATED: ${blockName} -->`,
+      content,
+      `<!-- END GENERATED: ${blockName} -->`,
+    ]),
+    '标记后内容',
+    '',
+  ].join('\n');
+}
+
+function renderMarkedDocument(source, blocks, contract) {
+  let content = source;
+  for (const [blockName, render] of blocks) {
+    content = replaceGeneratedBlock(content, blockName, render(contract)).content;
+  }
+  return content;
+}
+
+async function createCommandDocRepository(t, { currentTargets = [], invalidTarget = '' } = {}) {
+  const repositoryRoot = await mkdtemp(path.join(tmpdir(), 'agent-knowledge-command-docs-'));
+  t.after(() => rm(repositoryRoot, { recursive: true, force: true }));
+  const contract = await loadCommandContract();
+  const files = new Map();
+
+  for (const target of commandDocTargets) {
+    const filePath = path.join(repositoryRoot, ...target.relativePath.split('/'));
+    await mkdir(path.dirname(filePath), { recursive: true });
+    let content = createMarkedDocument(target.blocks);
+    if (currentTargets.includes(target.relativePath)) {
+      content = renderMarkedDocument(content, target.blocks, contract);
+    }
+    if (invalidTarget === target.relativePath) {
+      content = content.replace(`<!-- END GENERATED: ${target.blocks.at(-1)[0]} -->`, '非法结束标记');
+    }
+    await writeFile(filePath, content, 'utf8');
+    files.set(target.relativePath, { filePath, content, target });
+  }
+
+  return { repositoryRoot, contract, files };
+}
+
+function runSyncCommandDocs(repositoryRoot, ...args) {
+  return spawnSync(process.execPath, [
+    cliEntryPath,
+    'sync-command-docs',
+    ...args,
+    '--repository-root',
+    repositoryRoot,
+  ], { encoding: 'utf8' });
+}
+
+async function snapshotTree(root) {
+  const snapshot = [];
+  async function visit(currentPath) {
+    const entries = await readdir(currentPath, { withFileTypes: true });
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      const entryPath = path.join(currentPath, entry.name);
+      const relativePath = path.relative(root, entryPath).replaceAll('\\', '/');
+      if (entry.isDirectory()) {
+        snapshot.push({ path: `${relativePath}/`, type: 'directory' });
+        await visit(entryPath);
+      } else {
+        snapshot.push({
+          path: relativePath,
+          type: 'file',
+          content: (await readFile(entryPath)).toString('base64'),
+        });
+      }
+    }
+  }
+  await visit(root);
+  return snapshot;
+}
+
+function comparableStat(fileStat) {
+  return {
+    size: fileStat.size,
+    mtimeMs: fileStat.mtimeMs,
+    birthtimeMs: fileStat.birthtimeMs,
+  };
+}
+
+test('sync-command-docs --check 报告全部漂移且完全只读', async (t) => {
+  const { repositoryRoot } = await createCommandDocRepository(t);
+  const before = await snapshotTree(repositoryRoot);
+
+  const result = runSyncCommandDocs(repositoryRoot, '--check');
+
+  assert.equal(result.status, 1);
+  for (const target of commandDocTargets) {
+    for (const [blockName] of target.blocks) {
+      assert.match(result.stderr, new RegExp(`${target.relativePath.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}.*${blockName}`, 'u'));
+    }
+  }
+  assert.deepEqual(await snapshotTree(repositoryRoot), before);
+});
+
+test('sync-command-docs 只写漂移文件且再次运行不写入', async (t) => {
+  const currentTargets = commandDocTargets.slice(1).map(({ relativePath }) => relativePath);
+  const { repositoryRoot, contract, files } = await createCommandDocRepository(t, { currentTargets });
+  const stableStatsBefore = new Map();
+  for (const relativePath of currentTargets) {
+    stableStatsBefore.set(relativePath, comparableStat(await stat(files.get(relativePath).filePath)));
+  }
+
+  const first = runSyncCommandDocs(repositoryRoot);
+
+  assert.equal(first.status, 0, first.stderr);
+  const changedTarget = files.get('README.md');
+  assert.equal(
+    await readFile(changedTarget.filePath, 'utf8'),
+    renderMarkedDocument(changedTarget.content, changedTarget.target.blocks, contract),
+  );
+  for (const relativePath of currentTargets) {
+    assert.deepEqual(
+      comparableStat(await stat(files.get(relativePath).filePath)),
+      stableStatsBefore.get(relativePath),
+    );
+  }
+
+  const treeAfterFirst = await snapshotTree(repositoryRoot);
+  const statsAfterFirst = new Map();
+  for (const { relativePath } of commandDocTargets) {
+    statsAfterFirst.set(relativePath, comparableStat(await stat(files.get(relativePath).filePath)));
+  }
+  const second = runSyncCommandDocs(repositoryRoot);
+
+  assert.equal(second.status, 0, second.stderr);
+  assert.deepEqual(await snapshotTree(repositoryRoot), treeAfterFirst);
+  for (const { relativePath } of commandDocTargets) {
+    assert.deepEqual(
+      comparableStat(await stat(files.get(relativePath).filePath)),
+      statsAfterFirst.get(relativePath),
+    );
+  }
+});
+
+test('sync-command-docs 预检任一非法目标后不发生部分写入', async (t) => {
+  const { repositoryRoot } = await createCommandDocRepository(t, {
+    invalidTarget: 'agent-knowledge/README.md',
+  });
+  const before = await snapshotTree(repositoryRoot);
+
+  const result = runSyncCommandDocs(repositoryRoot);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /agent-knowledge\/README\.md.*标记/u);
+  assert.deepEqual(await snapshotTree(repositoryRoot), before);
+});
+
+const invalidSyncCommandDocsArgs = [
+  { name: '拒绝位置参数', args: ['extra'], error: /位置参数.*extra/u },
+  { name: '拒绝重复 --check', args: ['--check', '--check'], error: /--check.*一次/u },
+  { name: '拒绝未知参数', args: ['--unknown'], error: /未知参数.*--unknown/u },
+  { name: '拒绝 --knowledge-root', args: ['--knowledge-root', 'unused'], error: /--knowledge-root/u },
+  { name: '拒绝 --json', args: ['--json'], error: /--json/u },
+];
+
+for (const { name, args, error } of invalidSyncCommandDocsArgs) {
+  test(`sync-command-docs ${name}`, async (t) => {
+    const { repositoryRoot } = await createCommandDocRepository(t);
+
+    const result = runSyncCommandDocs(repositoryRoot, ...args);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, error);
+  });
+}
+
+test('sync-command-docs 拒绝缺少 --repository-root', () => {
+  const result = spawnSync(process.execPath, [cliEntryPath, 'sync-command-docs'], { encoding: 'utf8' });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /需要.*--repository-root/u);
+});
+
+test('sync-command-docs 拒绝重复 --repository-root', async (t) => {
+  const { repositoryRoot } = await createCommandDocRepository(t);
+  const result = runSyncCommandDocs(repositoryRoot, '--repository-root', repositoryRoot);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /--repository-root.*一次/u);
+});
+
+function findMatchingDelimiter(source, openingIndex, opening, closing) {
+  let depth = 0;
+  let state = 'code';
+
+  for (let index = openingIndex; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+
+    if (state === 'line-comment') {
+      if (character === '\n') state = 'code';
+      continue;
+    }
+    if (state === 'block-comment') {
+      if (character === '*' && next === '/') {
+        state = 'code';
+        index += 1;
+      }
+      continue;
+    }
+    if (state === 'single-quote' || state === 'double-quote' || state === 'template') {
+      if (character === '\\') {
+        index += 1;
+        continue;
+      }
+      if ((state === 'single-quote' && character === "'")
+          || (state === 'double-quote' && character === '"')
+          || (state === 'template' && character === '`')) {
+        state = 'code';
+      }
+      continue;
+    }
+    if (character === '/' && next === '/') {
+      state = 'line-comment';
+      index += 1;
+      continue;
+    }
+    if (character === '/' && next === '*') {
+      state = 'block-comment';
+      index += 1;
+      continue;
+    }
+    if (character === "'") {
+      state = 'single-quote';
+      continue;
+    }
+    if (character === '"') {
+      state = 'double-quote';
+      continue;
+    }
+    if (character === '`') {
+      state = 'template';
+      continue;
+    }
+    if (character === opening) depth += 1;
+    if (character === closing) {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+
+  throw new Error(`未找到匹配的 ${closing}`);
+}
+
+function extractTopLevelCommandRoutes(source) {
+  const mainStart = source.indexOf('async function main(');
+  assert.notEqual(mainStart, -1, '必须存在 async function main');
+  const bodyStart = source.indexOf('{', mainStart);
+  const bodyEnd = findMatchingDelimiter(source, bodyStart, '{', '}');
+  const body = source.slice(bodyStart + 1, bodyEnd);
+  const routes = [];
+  let depth = 0;
+
+  for (let index = 0; index < body.length; index += 1) {
+    if (body[index] === '{') {
+      depth += 1;
+      continue;
+    }
+    if (body[index] === '}') {
+      depth -= 1;
+      continue;
+    }
+    if (depth !== 0) continue;
+
+    if (/\bswitch\s*\(\s*command\s*\)/u.test(body.slice(index))) {
+      throw new Error('未知路由结构：switch (command)，请同步更新契约测试');
+    }
+
+    const rest = body.slice(index);
+    const ifMatch = rest.match(/^\s*if\s*\(/u);
+    if (!ifMatch) continue;
+    const conditionStart = index + ifMatch[0].lastIndexOf('(');
+    const conditionEnd = findMatchingDelimiter(body, conditionStart, '(', ')');
+    const condition = body.slice(conditionStart + 1, conditionEnd).trim();
+    index = conditionEnd;
+
+    if (condition === "!command || command === '--help' || command === '-h'") {
+      continue;
+    }
+    const routeMatch = condition.match(/^command === '([a-z0-9]+(?:-[a-z0-9]+)*)'$/u);
+    if (!routeMatch) {
+      if (/\bcommand\b/u.test(condition)) {
+        throw new Error(`未知路由结构：${condition}，请同步更新契约测试`);
+      }
+      continue;
+    }
+    routes.push(routeMatch[1]);
+  }
+
+  const topLevelWithoutAllowedIfs = body.replace(
+    /^\s*if\s*\(\s*(?:!command\s*\|\|\s*command\s*===\s*'--help'\s*\|\|\s*command\s*===\s*'-h'|command\s*===\s*'[a-z0-9]+(?:-[a-z0-9]+)*')\s*\)/gmu,
+    'if (true)',
+  );
+  if (/\bswitch\s*\(\s*command\s*\)|\b\w+\s*\[\s*command\s*\]\s*\(/u.test(topLevelWithoutAllowedIfs)) {
+    throw new Error('未知路由结构：检测到未登记的 command 顶层分发，请同步更新契约测试');
+  }
+
+  return routes;
+}
+
+function assertRouteContractEqual(actualRoutes, contractRoutes) {
+  assert.deepEqual(new Set(actualRoutes), new Set(contractRoutes));
+}
+
+test('CLI 帮助命令顺序来自契约且同步命令只出现一次', async () => {
+  const contract = await loadCommandContract();
+  const result = spawnSync(process.execPath, [cliEntryPath, '--help'], { encoding: 'utf8' });
+
+  assert.equal(result.status, 0, result.stderr);
+  const helpCommands = result.stdout
+    .split(/\r?\n/u)
+    .filter((line) => /^  [a-z0-9]/u.test(line))
+    .map((line) => line.trimStart().match(/^([a-z0-9-]+)/u)[1]);
+  assert.deepEqual(helpCommands, contract.cliCommands.map(({ name }) => name));
+  assert.equal(result.stdout.match(/\bsync-command-docs\b/gu)?.length, 1);
+});
+
+test('Node 顶层命令路由与契约双向一致', async () => {
+  const [contract, source] = await Promise.all([
+    loadCommandContract(),
+    readFile(cliEntryPath, 'utf8'),
+  ]);
+
+  assertRouteContractEqual(
+    extractTopLevelCommandRoutes(source),
+    contract.cliCommands.map(({ name }) => name),
+  );
+});
+
+test('路由一致性检查拒绝源码多出的命令', () => {
+  assert.throws(
+    () => assertRouteContractEqual(['known', 'extra'], ['known']),
+    assert.AssertionError,
+  );
+});
+
+test('路由一致性检查拒绝契约多出的命令', () => {
+  assert.throws(
+    () => assertRouteContractEqual(['known'], ['known', 'missing']),
+    assert.AssertionError,
+  );
+});
+
+test('路由提取器拒绝 switch 或查表式顶层分发', () => {
+  const switchSource = `async function main(argv) {
+    const [command] = argv;
+    switch (command) { case 'known': return 0; }
+  }`;
+  const lookupSource = `async function main(argv) {
+    const [command] = argv;
+    routes[command]();
+  }`;
+
+  assert.throws(() => extractTopLevelCommandRoutes(switchSource), /未知路由结构.*同步更新契约测试/u);
+  assert.throws(() => extractTopLevelCommandRoutes(lookupSource), /未知路由结构.*同步更新契约测试/u);
+});
 
 test('真实命令契约按登记顺序加载', async () => {
   const contract = await loadCommandContract();

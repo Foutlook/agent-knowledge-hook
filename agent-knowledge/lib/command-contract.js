@@ -10,6 +10,44 @@ const commandNamePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const commonStringFields = ['id', 'name', 'args', 'summary'];
 const allowedWriteModes = new Set(Object.keys(writeModeLabels));
 const allowedWrappers = new Set(['wrapper:projects', 'wrapper:raw']);
+const generatedBlockNamePattern = /^[A-Z][A-Z0-9_]*$/;
+
+export function replaceGeneratedBlock(source, blockName, generated) {
+  if (typeof source !== 'string' || typeof generated !== 'string') {
+    throw new Error('生成区块的源内容和生成内容必须是字符串');
+  }
+  if (!generatedBlockNamePattern.test(blockName)) {
+    throw new Error(`生成区块名称非法：${blockName}`);
+  }
+
+  const newline = detectNewlineStyle(source);
+  const beginMarker = `<!-- BEGIN GENERATED: ${blockName} -->`;
+  const endMarker = `<!-- END GENERATED: ${blockName} -->`;
+  const beginIndexes = findAllIndexes(source, beginMarker);
+  const endIndexes = findAllIndexes(source, endMarker);
+
+  if (beginIndexes.length === 0 || endIndexes.length === 0) {
+    throw new Error(`生成区块 ${blockName} 标记缺失`);
+  }
+  if (beginIndexes.length > 1 || endIndexes.length > 1) {
+    throw new Error(`生成区块 ${blockName} 标记重复`);
+  }
+  if (endIndexes[0] < beginIndexes[0]) {
+    throw new Error(`生成区块 ${blockName} 标记颠倒`);
+  }
+
+  assertStandaloneMarkerLine(source, beginIndexes[0], beginMarker, blockName, newline);
+  assertStandaloneMarkerLine(source, endIndexes[0], endMarker, blockName, newline);
+  assertGeneratedMarkersNotNested(source);
+
+  const normalizedGenerated = generated
+    .replace(/\r\n|\r|\n/gu, newline)
+    .replace(/^(?:\r\n|\n)+|(?:\r\n|\n)+$/gu, '');
+  const contentStart = beginIndexes[0] + beginMarker.length;
+  const contentEnd = endIndexes[0];
+  const content = `${source.slice(0, contentStart)}${newline}${normalizedGenerated}${newline}${source.slice(contentEnd)}`;
+  return { content, changed: content !== source };
+}
 
 export function validateCommandContract(contract) {
   if (!contract || typeof contract !== 'object' || Array.isArray(contract)) {
@@ -88,6 +126,53 @@ function renderCommand(command, prefix = '') {
 
 function escapeMarkdown(value) {
   return value.replaceAll('|', '\\|');
+}
+
+function detectNewlineStyle(source) {
+  const hasCrLf = source.includes('\r\n');
+  const withoutCrLf = source.replaceAll('\r\n', '');
+  const hasLf = withoutCrLf.includes('\n');
+  const hasCr = withoutCrLf.includes('\r');
+  if ((hasCrLf && (hasLf || hasCr)) || hasCr || (!hasCrLf && hasCr)) {
+    throw new Error('生成区块源文件包含混合换行');
+  }
+  return hasCrLf ? '\r\n' : '\n';
+}
+
+function findAllIndexes(source, value) {
+  const indexes = [];
+  for (let index = source.indexOf(value); index !== -1; index = source.indexOf(value, index + value.length)) {
+    indexes.push(index);
+  }
+  return indexes;
+}
+
+function assertStandaloneMarkerLine(source, index, marker, blockName, newline) {
+  const before = source.slice(0, index);
+  const after = source.slice(index + marker.length);
+  if ((before && !before.endsWith(newline)) || (after && !after.startsWith(newline))) {
+    throw new Error(`生成区块 ${blockName} 标记必须独占一行`);
+  }
+}
+
+function assertGeneratedMarkersNotNested(source) {
+  const markerPattern = /<!-- (BEGIN|END) GENERATED: ([A-Z][A-Z0-9_]*) -->/gu;
+  const stack = [];
+  for (const match of source.matchAll(markerPattern)) {
+    const [, type, blockName] = match;
+    if (type === 'BEGIN') {
+      // 生成区块必须扁平排列，否则单块更新可能悄悄改写另一个区块的边界。
+      if (stack.length > 0) {
+        throw new Error(`生成区块标记不允许嵌套：${stack.at(-1)} -> ${blockName}`);
+      }
+      stack.push(blockName);
+    } else if (stack.pop() !== blockName) {
+      throw new Error(`生成区块标记不匹配：${blockName}`);
+    }
+  }
+  if (stack.length > 0) {
+    throw new Error(`生成区块标记不匹配：${stack.at(-1)}`);
+  }
 }
 
 function validateCommandCollection(commands, collectionName, isAkCommand) {
