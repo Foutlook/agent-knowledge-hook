@@ -53,8 +53,31 @@ const akCommandNames = [
 const cliEntryPath = fileURLToPath(new URL('../bin/agent-knowledge.js', import.meta.url));
 const akEntryPath = fileURLToPath(new URL('../bin/ak.ps1', import.meta.url));
 const repositoryRootPath = fileURLToPath(new URL('../../', import.meta.url));
+const workflowPath = fileURLToPath(new URL('../../.github/workflows/agent-knowledge-ci.yml', import.meta.url));
 const blockBegin = '<!-- BEGIN GENERATED: TEST_BLOCK -->';
 const blockEnd = '<!-- END GENERATED: TEST_BLOCK -->';
+
+test('CI 在测试后、适配器检查前只读检查命令文档漂移', async () => {
+  const workflow = await readFile(workflowPath, 'utf8');
+  const runTestsIndex = workflow.indexOf('run: npm test');
+  const commandDocsCheck = 'run: node bin/agent-knowledge.js sync-command-docs --check --repository-root ..';
+  const commandDocsCheckIndex = workflow.indexOf(commandDocsCheck);
+  const adaptersCheckIndex = workflow.indexOf(
+    'run: node bin/agent-knowledge.js sync-adapters --check --repository-root ..',
+  );
+  const syncCommandDocsRuns = workflow
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('run:') && line.includes('sync-command-docs'));
+
+  assert.notEqual(runTestsIndex, -1, 'CI 缺少测试步骤');
+  assert.notEqual(commandDocsCheckIndex, -1, 'CI 缺少命令文档只读漂移检查');
+  assert.notEqual(adaptersCheckIndex, -1, 'CI 缺少适配器只读漂移检查');
+  assert.ok(runTestsIndex < commandDocsCheckIndex, '命令文档漂移检查必须位于测试步骤之后');
+  assert.ok(commandDocsCheckIndex < adaptersCheckIndex, '命令文档漂移检查必须位于适配器检查之前');
+  assert.deepEqual(syncCommandDocsRuns, [commandDocsCheck]);
+  assert.doesNotMatch(workflow, /--knowledge-root|team-agent-knowledge|AGENT_KNOWLEDGE_ROOT/u);
+});
 
 test('生成区块保持 LF 且标记外内容逐字节不变', () => {
   const source = `前缀\n${blockBegin}\n旧内容\n${blockEnd}\n后缀\n`;

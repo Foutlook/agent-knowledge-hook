@@ -26,6 +26,8 @@ jobs:
           package-manager-cache: false
       - name: Run tests
         run: npm test
+      - name: Check generated command documentation
+        run: node bin/agent-knowledge.js sync-command-docs --check --repository-root ..
       - name: Check generated adapters
         run: node bin/agent-knowledge.js sync-adapters --check --repository-root ..
       - name: Check bundled knowledge base

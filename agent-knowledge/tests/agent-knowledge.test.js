@@ -4848,6 +4848,8 @@ const expectedMinimalCiWorkflow = [
   '          package-manager-cache: false',
   '      - name: Run tests',
   '        run: npm test',
+  '      - name: Check generated command documentation',
+  '        run: node bin/agent-knowledge.js sync-command-docs --check --repository-root ..',
   '      - name: Check generated adapters',
   '        run: node bin/agent-knowledge.js sync-adapters --check --repository-root ..',
   '      - name: Check bundled knowledge base',
@@ -4875,6 +4877,7 @@ function assertMinimalCiWorkflow(content) {
   const commands = [...content.matchAll(/^[ \t]+run:[ \t]+(\S.*)$/gm)].map((match) => match[1]);
   assert.deepEqual(commands, [
     'npm test',
+    'node bin/agent-knowledge.js sync-command-docs --check --repository-root ..',
     'node bin/agent-knowledge.js sync-adapters --check --repository-root ..',
     'node bin/agent-knowledge.js doctor --repository-root ..',
   ]);
@@ -4884,7 +4887,10 @@ function assertMinimalCiWorkflow(content) {
   );
   assert.doesNotMatch(content, /^\s+[\w-]+:\s+write\s*$/m);
   assert.doesNotMatch(content, /\b(?:npm|pnpm|yarn)\s+(?:ci|install)\b/i);
-  assert.doesNotMatch(content, /team-agent-knowledge|AGENT_KNOWLEDGE_ROOT|continue-on-error/i);
+  assert.doesNotMatch(
+    content,
+    /--knowledge-root|team-agent-knowledge|AGENT_KNOWLEDGE_ROOT|continue-on-error/i,
+  );
   assert.doesNotMatch(content, /\b(?:curl|wget|Invoke-WebRequest)\b/i);
   assert.equal(
     content.replace(/\r\n?/g, '\n'),
