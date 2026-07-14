@@ -344,7 +344,7 @@ function findMatchingDelimiter(source, openingIndex, opening, closing) {
 }
 
 function* iterateJavaScriptCode(source, start = 0) {
-  const states = [{ type: 'code' }];
+  const states = [{ type: 'code', slashContext: 'expression-start', identifierEnd: -1 }];
   for (let index = start; index < source.length; index += 1) {
     const character = source[index];
     const next = source[index + 1];
@@ -367,6 +367,24 @@ function* iterateJavaScriptCode(source, start = 0) {
       } else if ((state.type === 'single-quote' && character === "'")
           || (state.type === 'double-quote' && character === '"')) {
         states.pop();
+        markParentAsValue(states);
+      }
+      continue;
+    }
+    if (state.type === 'regex') {
+      if (character === '\n' || character === '\r') {
+        throw new Error('正则字面量不能包含未转义换行');
+      }
+      if (character === '\\') {
+        index += 1;
+      } else if (character === '[' && !state.inCharacterClass) {
+        state.inCharacterClass = true;
+      } else if (character === ']' && state.inCharacterClass) {
+        state.inCharacterClass = false;
+      } else if (character === '/' && !state.inCharacterClass) {
+        states.pop();
+        while (/[A-Za-z]/u.test(source[index + 1] ?? '')) index += 1;
+        markParentAsValue(states);
       }
       continue;
     }
@@ -375,8 +393,14 @@ function* iterateJavaScriptCode(source, start = 0) {
         index += 1;
       } else if (character === '`') {
         states.pop();
+        markParentAsValue(states);
       } else if (character === '$' && next === '{') {
-        states.push({ type: 'template-expression', braceDepth: 1 });
+        states.push({
+          type: 'template-expression',
+          braceDepth: 1,
+          slashContext: 'expression-start',
+          identifierEnd: -1,
+        });
         index += 1;
         yield { index, character: '{' };
       }
@@ -389,9 +413,19 @@ function* iterateJavaScriptCode(source, start = 0) {
       } else if (character === '}') {
         state.braceDepth -= 1;
         yield { index, character };
-        if (state.braceDepth === 0) states.pop();
+        if (state.braceDepth === 0) {
+          states.pop();
+        } else {
+          // `}` 可能结束对象字面量或语句块，紧随其后的 `/` 无法可靠分类，必须失败关闭。
+          state.slashContext = 'ambiguous';
+        }
         continue;
       }
+    }
+
+    if (index <= state.identifierEnd) {
+      yield { index, character };
+      continue;
     }
 
     if (character === '/' && next === '/') {
@@ -400,13 +434,28 @@ function* iterateJavaScriptCode(source, start = 0) {
     } else if (character === '/' && next === '*') {
       states.push({ type: 'block-comment' });
       index += 1;
+    } else if (character === '/') {
+      if (state.slashContext === 'expression-start') {
+        states.push({ type: 'regex', inCharacterClass: false });
+      } else if (state.slashContext === 'after-value') {
+        yield { index, character };
+        state.slashContext = 'expression-start';
+      } else {
+        throw new Error(`无法判断位置 ${index} 的 / 是正则字面量还是除法，请更新路由提取器`);
+      }
     } else if (character === "'") {
       states.push({ type: 'single-quote' });
     } else if (character === '"') {
       states.push({ type: 'double-quote' });
     } else if (character === '`') {
       states.push({ type: 'template' });
+    } else if (/[A-Za-z_$]/u.test(character)) {
+      const identifier = source.slice(index).match(/^[A-Za-z_$][\w$]*/u)[0];
+      state.identifierEnd = index + identifier.length - 1;
+      state.slashContext = regexPrefixKeywords.has(identifier) ? 'expression-start' : 'after-value';
+      yield { index, character };
     } else {
+      updateSlashContextForPunctuation(state, character, next);
       yield { index, character };
     }
   }
@@ -414,6 +463,36 @@ function* iterateJavaScriptCode(source, start = 0) {
   const unclosedState = states.find((state) => !['code', 'line-comment'].includes(state.type));
   if (unclosedState) {
     throw new Error(`JavaScript 词法结构未闭合：${unclosedState.type}`);
+  }
+}
+
+const regexPrefixKeywords = new Set([
+  'await', 'case', 'catch', 'const', 'delete', 'do', 'else', 'for', 'if', 'in', 'instanceof',
+  'let', 'new', 'of', 'return', 'switch', 'throw', 'typeof', 'var', 'void', 'while', 'with', 'yield',
+]);
+
+function markParentAsValue(states) {
+  const parent = states.at(-1);
+  if (parent?.type === 'code' || parent?.type === 'template-expression') {
+    parent.slashContext = 'after-value';
+  }
+}
+
+function updateSlashContextForPunctuation(state, character, next) {
+  if (/\s/u.test(character)) return;
+  if (/[0-9]/u.test(character) || [')', ']'].includes(character)) {
+    state.slashContext = 'after-value';
+  } else if (character === '.') {
+    state.slashContext = 'ambiguous';
+  } else if (character === '}') {
+    state.slashContext = 'ambiguous';
+  } else if (character === '+' && next === '+' && state.slashContext === 'after-value') {
+    state.slashContext = 'after-value';
+  } else if (character === '-' && next === '-' && state.slashContext === 'after-value') {
+    state.slashContext = 'after-value';
+  } else {
+    // 开分隔符、赋值符和普通运算符之后都需要一个新表达式，正则字面量在这些位置合法。
+    state.slashContext = 'expression-start';
   }
 }
 
@@ -648,6 +727,44 @@ test('路由提取器忽略纯模板文本并完整消费复杂插值语句', ()
     + '}';
 
   assert.deepEqual(extractTopLevelCommandRoutes(source), ['known']);
+});
+
+test('路由提取器拒绝模板插值正则之后的 command 引用', () => {
+  const source = "async function main(argv) {\n"
+    + "  const [command] = argv;\n"
+    + "  if (`${/}/.test(command)}` === 'extra') { return 0; }\n"
+    + '}';
+
+  assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+});
+
+test('路由提取器忽略正则文本并支持转义斜杠、字符类和 flags', () => {
+  const source = "async function main(argv) {\n"
+    + "  const [command] = argv;\n"
+    + '  const pattern = /command\\\/[}]/giu;\n'
+    + "  if (command === 'known') { return 0; }\n"
+    + '}';
+
+  assert.deepEqual(extractTopLevelCommandRoutes(source), ['known']);
+});
+
+test('路由提取器保持普通除法表达式', () => {
+  const source = "async function main(argv) {\n"
+    + "  const [command] = argv;\n"
+    + '  const ratio = total / divisor;\n'
+    + "  if (command === 'known') { return 0; }\n"
+    + '}';
+
+  assert.deepEqual(extractTopLevelCommandRoutes(source), ['known']);
+});
+
+test('路由提取器对无法分类的斜杠失败关闭', () => {
+  const source = "async function main(argv) {\n"
+    + "  const [command] = argv;\n"
+    + '  const invalid = target. /hidden/;\n'
+    + '}';
+
+  assert.throws(() => extractTopLevelCommandRoutes(source), /无法判断.*正则.*除法/u);
 });
 
 test('真实命令契约按登记顺序加载', async () => {
