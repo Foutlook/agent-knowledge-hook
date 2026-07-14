@@ -330,307 +330,83 @@ test('sync-command-docs 拒绝重复 --repository-root', async (t) => {
   assert.match(result.stderr, /--repository-root.*一次/u);
 });
 
-function findMatchingDelimiter(source, openingIndex, opening, closing) {
-  let depth = 0;
-  for (const { index, character } of iterateJavaScriptCode(source, openingIndex)) {
-    if (character === opening) depth += 1;
-    if (character === closing) {
-      depth -= 1;
-      if (depth === 0) return index;
-    }
-  }
-
-  throw new Error(`未找到匹配的 ${closing}`);
-}
-
-function* iterateJavaScriptCode(source, start = 0) {
-  const states = [{ type: 'code', slashContext: 'expression-start', identifierEnd: -1 }];
-  for (let index = start; index < source.length; index += 1) {
-    const character = source[index];
-    const next = source[index + 1];
-    const state = states.at(-1);
-
-    if (state.type === 'line-comment') {
-      if (character === '\n') states.pop();
-      continue;
-    }
-    if (state.type === 'block-comment') {
-      if (character === '*' && next === '/') {
-        states.pop();
-        index += 1;
-      }
-      continue;
-    }
-    if (state.type === 'single-quote' || state.type === 'double-quote') {
-      if (character === '\\') {
-        index += 1;
-      } else if ((state.type === 'single-quote' && character === "'")
-          || (state.type === 'double-quote' && character === '"')) {
-        states.pop();
-        markParentAsValue(states);
-      }
-      continue;
-    }
-    if (state.type === 'regex') {
-      if (character === '\n' || character === '\r') {
-        throw new Error('正则字面量不能包含未转义换行');
-      }
-      if (character === '\\') {
-        index += 1;
-      } else if (character === '[' && !state.inCharacterClass) {
-        state.inCharacterClass = true;
-      } else if (character === ']' && state.inCharacterClass) {
-        state.inCharacterClass = false;
-      } else if (character === '/' && !state.inCharacterClass) {
-        states.pop();
-        while (/[A-Za-z]/u.test(source[index + 1] ?? '')) index += 1;
-        markParentAsValue(states);
-      }
-      continue;
-    }
-    if (state.type === 'template') {
-      if (character === '\\') {
-        index += 1;
-      } else if (character === '`') {
-        states.pop();
-        markParentAsValue(states);
-      } else if (character === '$' && next === '{') {
-        states.push({
-          type: 'template-expression',
-          braceDepth: 1,
-          slashContext: 'expression-start',
-          identifierEnd: -1,
-        });
-        index += 1;
-        yield { index, character: '{' };
-      }
-      continue;
-    }
-
-    if (state.type === 'template-expression') {
-      if (character === '{') {
-        state.braceDepth += 1;
-      } else if (character === '}') {
-        state.braceDepth -= 1;
-        yield { index, character };
-        if (state.braceDepth === 0) {
-          states.pop();
-        } else {
-          // `}` 可能结束对象字面量或语句块，紧随其后的 `/` 无法可靠分类，必须失败关闭。
-          state.slashContext = 'ambiguous';
-        }
-        continue;
-      }
-    }
-
-    if (index <= state.identifierEnd) {
-      yield { index, character };
-      continue;
-    }
-
-    if (character === '/' && next === '/') {
-      states.push({ type: 'line-comment' });
-      index += 1;
-    } else if (character === '/' && next === '*') {
-      states.push({ type: 'block-comment' });
-      index += 1;
-    } else if ((character === '+' && next === '+') || (character === '-' && next === '-')) {
-      const operator = `${character}${next}`;
-      if (state.slashContext === 'ambiguous') {
-        throw new Error(`无法判断 ${operator} 是前缀还是后缀运算符，请更新路由提取器`);
-      }
-      const nextSlashContext = state.slashContext === 'after-value'
-        ? 'after-value'
-        : 'expression-start';
-      // 递增/递减必须作为一个 token 消费，否则第二个字符会覆盖第一个字符确定的前后缀语义。
-      yield { index, character };
-      index += 1;
-      yield { index, character: next };
-      state.slashContext = nextSlashContext;
-    } else if (character === '/') {
-      if (state.slashContext === 'expression-start') {
-        states.push({ type: 'regex', inCharacterClass: false });
-      } else if (state.slashContext === 'after-value') {
-        yield { index, character };
-        state.slashContext = 'expression-start';
-      } else {
-        throw new Error(`无法判断位置 ${index} 的 / 是正则字面量还是除法，请更新路由提取器`);
-      }
-    } else if (character === "'") {
-      states.push({ type: 'single-quote' });
-    } else if (character === '"') {
-      states.push({ type: 'double-quote' });
-    } else if (character === '`') {
-      states.push({ type: 'template' });
-    } else if (/[A-Za-z_$]/u.test(character)) {
-      const identifier = source.slice(index).match(/^[A-Za-z_$][\w$]*/u)[0];
-      state.identifierEnd = index + identifier.length - 1;
-      state.slashContext = regexPrefixKeywords.has(identifier) ? 'expression-start' : 'after-value';
-      yield { index, character };
-    } else {
-      updateSlashContextForPunctuation(state, character);
-      yield { index, character };
-    }
-  }
-
-  const unclosedState = states.find((state) => !['code', 'line-comment'].includes(state.type));
-  if (unclosedState) {
-    throw new Error(`JavaScript 词法结构未闭合：${unclosedState.type}`);
-  }
-}
-
-const regexPrefixKeywords = new Set([
-  'await', 'case', 'catch', 'const', 'delete', 'do', 'else', 'for', 'if', 'in', 'instanceof',
-  'let', 'new', 'of', 'return', 'switch', 'throw', 'typeof', 'var', 'void', 'while', 'with', 'yield',
-]);
-
-function markParentAsValue(states) {
-  const parent = states.at(-1);
-  if (parent?.type === 'code' || parent?.type === 'template-expression') {
-    parent.slashContext = 'after-value';
-  }
-}
-
-function updateSlashContextForPunctuation(state, character) {
-  if (/\s/u.test(character)) return;
-  if (/[0-9]/u.test(character) || [')', ']'].includes(character)) {
-    state.slashContext = 'after-value';
-  } else if (character === '.') {
-    state.slashContext = 'ambiguous';
-  } else if (character === '}') {
-    state.slashContext = 'ambiguous';
-  } else {
-    // 开分隔符、赋值符和普通运算符之后都需要一个新表达式，正则字面量在这些位置合法。
-    state.slashContext = 'expression-start';
-  }
-}
+const mainInitializationLines = [
+  '  const contract = await loadCommandContract();',
+  '  const [command, ...args] = argv;',
+  '  const globalOptions = parseGlobalOptions(args);',
+];
+const helpRouteHeader = "  if (!command || command === '--help' || command === '-h') {";
+const unknownCommandLine = '  console.error(`未知命令：${command}\\n\\n${usage(contract)}`);';
+const commandRouteHeaderPattern = /^  if \(command === '([a-z0-9]+(?:-[a-z0-9]+)*)'\) \{$/u;
 
 function extractTopLevelCommandRoutes(source) {
-  const mainStart = source.indexOf('async function main(');
-  assert.notEqual(mainStart, -1, '必须存在 async function main');
-  const bodyStart = source.indexOf('{', mainStart);
-  const bodyEnd = findMatchingDelimiter(source, bodyStart, '{', '}');
-  const body = source.slice(bodyStart + 1, bodyEnd);
-  const routes = [];
-  let index = 0;
-
-  while (index < body.length) {
-    index = skipWhitespaceAndComments(body, index);
-    if (index >= body.length) break;
-
-    if (!startsWithKeyword(body, index, 'if')) {
-      const statementEnd = findTopLevelStatementEnd(body, index);
-      const statement = body.slice(index, statementEnd);
-      const commandDeclaration = /^const\s*\[\s*command(?:\s*,\s*\.\.\.[A-Za-z_$][\w$]*)?\s*\]\s*=\s*argv\s*;$/u;
-      // 最终兜底仅把未知命令写入错误信息，不参与分发，因此与声明一起作为唯一非路由例外。
-      const unknownCommandDiagnostic = /^console\.error\(`未知命令：\$\{command\}\\n\\n\$\{usage\(contract\)\}`\);$/u;
-      if (containsCodeIdentifier(statement, 'command')
-          && !commandDeclaration.test(statement.trim())
-          && !unknownCommandDiagnostic.test(statement.trim())) {
-        throw new Error(`未知路由结构：${statement.trim()}，请同步更新契约测试`);
-      }
-      index = statementEnd;
-      continue;
-    }
-
-    const conditionStart = skipWhitespaceAndComments(body, index + 'if'.length);
-    if (body[conditionStart] !== '(') {
-      throw new Error('未知路由结构：if 缺少条件括号，请同步更新契约测试');
-    }
-    const conditionEnd = findMatchingDelimiter(body, conditionStart, '(', ')');
-    const condition = body.slice(conditionStart + 1, conditionEnd).trim();
-    const branchStart = skipWhitespaceAndComments(body, conditionEnd + 1);
-    if (body[branchStart] !== '{') {
-      throw new Error(`未知路由结构：if (${condition})，请同步更新契约测试`);
-    }
-    const branchEnd = findMatchingDelimiter(body, branchStart, '{', '}');
-
-    if (condition === "!command || command === '--help' || command === '-h'") {
-      index = branchEnd + 1;
-    } else {
-      const routeMatch = condition.match(/^command === '([a-z0-9]+(?:-[a-z0-9]+)*)'$/u);
-      if (!routeMatch) {
-        if (containsCodeIdentifier(condition, 'command')) {
-          throw new Error(`未知路由结构：${condition}，请同步更新契约测试`);
-        }
-      } else {
-        routes.push(routeMatch[1]);
-      }
-      index = branchEnd + 1;
-    }
-
-    const afterBranch = skipWhitespaceAndComments(body, index);
-    if (startsWithKeyword(body, afterBranch, 'else')) {
-      throw new Error('未知路由结构：顶层路由不允许 else，请同步更新契约测试');
-    }
+  const lines = source.split(/\r?\n/u);
+  const mainHeader = 'async function main(argv) {';
+  const mainStart = lines.indexOf(mainHeader);
+  if (mainStart === -1 || lines.indexOf(mainHeader, mainStart + 1) !== -1) {
+    throw new Error('未知路由结构：必须且只能存在一个规范 main 头，请同步更新契约测试');
   }
+
+  const routes = [];
+  let index = mainStart + 1;
+  for (const initializationLine of mainInitializationLines) {
+    assertMainLine(lines, index, initializationLine);
+    index += 1;
+  }
+
+  index = skipBlankLines(lines, index);
+  assertMainLine(lines, index, helpRouteHeader);
+  index = consumeCanonicalBranch(lines, index);
+
+  while (true) {
+    index = skipBlankLines(lines, index);
+    const routeMatch = lines[index]?.match(commandRouteHeaderPattern);
+    if (!routeMatch) break;
+    if (routes.includes(routeMatch[1])) {
+      throw new Error(`未知路由结构：重复命令 ${routeMatch[1]}，请同步更新契约测试`);
+    }
+    routes.push(routeMatch[1]);
+    index = consumeCanonicalBranch(lines, index);
+  }
+
+  assertMainLine(lines, index, unknownCommandLine);
+  assertMainLine(lines, index + 1, '  return 1;');
+  assertMainLine(lines, index + 2, '}');
 
   return routes;
 }
 
-function skipWhitespaceAndComments(source, start) {
+function skipBlankLines(lines, start) {
   let index = start;
-  while (index < source.length) {
-    if (/\s/u.test(source[index])) {
-      index += 1;
-    } else if (source.startsWith('//', index)) {
-      const newlineIndex = source.indexOf('\n', index + 2);
-      index = newlineIndex === -1 ? source.length : newlineIndex + 1;
-    } else if (source.startsWith('/*', index)) {
-      const commentEnd = source.indexOf('*/', index + 2);
-      if (commentEnd === -1) throw new Error('main 中存在未闭合块注释');
-      index = commentEnd + 2;
-    } else {
-      break;
-    }
-  }
+  while (lines[index] === '') index += 1;
   return index;
 }
 
-function startsWithKeyword(source, index, keyword) {
-  return source.startsWith(keyword, index)
-    && !/[\w$]/u.test(source[index - 1] ?? '')
-    && !/[\w$]/u.test(source[index + keyword.length] ?? '');
+function consumeCanonicalBranch(lines, headerIndex) {
+  let index = headerIndex + 1;
+  let bodyLineCount = 0;
+  while (index < lines.length && lines[index] !== '  }') {
+    if (lines[index] !== '' && !lines[index].startsWith('    ')) {
+      throwUnknownMainLine(lines, index);
+    }
+    if (lines[index] !== '') bodyLineCount += 1;
+    index += 1;
+  }
+  if (bodyLineCount === 0 || lines[index] !== '  }') {
+    throwUnknownMainLine(lines, index);
+  }
+  return index + 1;
 }
 
-function findTopLevelStatementEnd(source, start) {
-  let parentheses = 0;
-  let brackets = 0;
-  let braces = 0;
-  for (const { index, character } of iterateJavaScriptCode(source, start)) {
-    if (character === '(') {
-      parentheses += 1;
-    } else if (character === ')') {
-      parentheses -= 1;
-    } else if (character === '[') {
-      brackets += 1;
-    } else if (character === ']') {
-      brackets -= 1;
-    } else if (character === '{') {
-      braces += 1;
-    } else if (character === '}') {
-      braces -= 1;
-    } else if (character === ';' && parentheses === 0 && brackets === 0 && braces === 0) {
-      return index + 1;
-    }
+function assertMainLine(lines, index, expected) {
+  if (lines[index] !== expected) {
+    throwUnknownMainLine(lines, index);
   }
-  return source.length;
 }
 
-function containsCodeIdentifier(source, identifier) {
-  let previousCodeIndex = -2;
-  let previousCodeCharacter = '';
-  for (const { index, character } of iterateJavaScriptCode(source)) {
-    const startsIdentifier = /[A-Za-z_$]/u.test(character)
-      && (previousCodeIndex !== index - 1 || !/[\w$]/u.test(previousCodeCharacter));
-    if (startsIdentifier) {
-      const identifierMatch = source.slice(index).match(/^[A-Za-z_$][\w$]*/u)[0];
-      if (identifierMatch === identifier) return true;
-    }
-    previousCodeIndex = index;
-    previousCodeCharacter = character;
-  }
-  return false;
+function throwUnknownMainLine(lines, index) {
+  const actual = lines[index] ?? '(文件提前结束)';
+  throw new Error(`未知路由结构：main 第 ${index + 1} 行 ${actual}，请同步更新契约测试`);
 }
 
 function assertRouteContractEqual(actualRoutes, contractRoutes) {
@@ -676,173 +452,124 @@ test('路由一致性检查拒绝契约多出的命令', () => {
   );
 });
 
-test('路由提取器拒绝 switch 或查表式顶层分发', () => {
-  const switchSource = `async function main(argv) {
-    const [command] = argv;
-    switch (command) { case 'known': return 0; }
-  }`;
-  const lookupSource = `async function main(argv) {
-    const [command] = argv;
-    routes[command]();
-  }`;
+function createCanonicalMain(topLevelLines) {
+  return [
+    'async function main(argv) {',
+    ...mainInitializationLines,
+    '',
+    helpRouteHeader,
+    '    return 0;',
+    '  }',
+    '',
+    ...topLevelLines,
+    '',
+    unknownCommandLine,
+    '  return 1;',
+    '}',
+  ].join('\n');
+}
 
-  assert.throws(() => extractTopLevelCommandRoutes(switchSource), /未知路由结构.*同步更新契约测试/u);
-  assert.throws(() => extractTopLevelCommandRoutes(lookupSource), /未知路由结构.*同步更新契约测试/u);
+function createCanonicalRoute(name) {
+  return [
+    `  if (command === '${name}') {`,
+    '    return 0;',
+    '  }',
+    '',
+  ];
+}
+
+const canonicalKnownRoute = createCanonicalRoute('known');
+const unknownRouteStructure = /未知路由结构.*同步更新契约测试/u;
+
+test('规范布局提取器登记字面量路由', () => {
+  assert.deepEqual(extractTopLevelCommandRoutes(createCanonicalMain(canonicalKnownRoute)), ['known']);
+});
+
+test('路由提取器拒绝 switch 或查表式顶层分发', () => {
+  const switchSource = createCanonicalMain([
+    ...canonicalKnownRoute,
+    '  switch (command) {',
+    "    case 'extra': return 0;",
+    '  }',
+  ]);
+  const lookupSource = createCanonicalMain([
+    ...canonicalKnownRoute,
+    '  routes[command]();',
+  ]);
+
+  assert.throws(() => extractTopLevelCommandRoutes(switchSource), unknownRouteStructure);
+  assert.throws(() => extractTopLevelCommandRoutes(lookupSource), unknownRouteStructure);
 });
 
 test('路由提取器拒绝顶层直接传递 command 的分发调用', () => {
-  const source = `async function main(argv) {
-    const [command] = argv;
-    if (command === 'known') { return 0; }
-    dispatch(command);
-  }`;
+  const source = createCanonicalMain([...canonicalKnownRoute, '  dispatch(command);']);
 
-  assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+  assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
 });
 
 test('路由提取器拒绝顶层 Map 查找 command 的分发调用', () => {
-  const source = `async function main(argv) {
-    const [command] = argv;
-    if (command === 'known') { return 0; }
-    routes.get(command)?.();
-  }`;
+  const source = createCanonicalMain([...canonicalKnownRoute, '  routes.get(command)?.();']);
 
-  assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+  assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
 });
 
-test('路由提取器拒绝 if 条件模板插值中的 command 引用', () => {
-  const source = "async function main(argv) {\n"
-    + "  const [command] = argv;\n"
-    + "  if (`${command}` === 'extra') { return 0; }\n"
-    + '}';
+test('路由提取器拒绝模板插值 command 分发头', () => {
+  const source = createCanonicalMain([
+    ...canonicalKnownRoute,
+    "  if (`${command}` === 'extra') {",
+    '    return 0;',
+    '  }',
+  ]);
 
-  assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+  assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
 });
 
-test('路由提取器拒绝嵌套模板插值中的 command 引用', () => {
-  const source = "async function main(argv) {\n"
-    + "  const [command] = argv;\n"
-    + '  const selected = `${`${command}`}`;\n'
-    + '}';
+test('路由提取器拒绝模板插值正则绕过分发头', () => {
+  const source = createCanonicalMain([
+    ...canonicalKnownRoute,
+    "  if (`${/}/.test(command)}` === 'extra') {",
+    '    return 0;',
+    '  }',
+  ]);
 
-  assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
-});
-
-test('路由提取器忽略纯模板文本并完整消费复杂插值语句', () => {
-  const source = "async function main(argv) {\n"
-    + "  const [command] = argv;\n"
-    + "  const label = `${(() => { const text = 'command'; /* command */ return `${text};command`; })()}`;\n"
-    + "  if (command === 'known') { return 0; }\n"
-    + '}';
-
-  assert.deepEqual(extractTopLevelCommandRoutes(source), ['known']);
-});
-
-test('路由提取器拒绝模板插值正则之后的 command 引用', () => {
-  const source = "async function main(argv) {\n"
-    + "  const [command] = argv;\n"
-    + "  if (`${/}/.test(command)}` === 'extra') { return 0; }\n"
-    + '}';
-
-  assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
-});
-
-test('路由提取器忽略正则文本并支持转义斜杠、字符类和 flags', () => {
-  const source = "async function main(argv) {\n"
-    + "  const [command] = argv;\n"
-    + '  const pattern = /command\\\/[}]/giu;\n'
-    + "  if (command === 'known') { return 0; }\n"
-    + '}';
-
-  assert.deepEqual(extractTopLevelCommandRoutes(source), ['known']);
-});
-
-test('路由提取器保持普通除法表达式', () => {
-  const source = "async function main(argv) {\n"
-    + "  const [command] = argv;\n"
-    + '  const ratio = total / divisor;\n'
-    + "  if (command === 'known') { return 0; }\n"
-    + '}';
-
-  assert.deepEqual(extractTopLevelCommandRoutes(source), ['known']);
-});
-
-test('路由提取器对无法分类的斜杠失败关闭', () => {
-  const source = "async function main(argv) {\n"
-    + "  const [command] = argv;\n"
-    + '  const invalid = target. /hidden/;\n'
-    + '}';
-
-  assert.throws(() => extractTopLevelCommandRoutes(source), /无法判断.*正则.*除法/u);
+  assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
 });
 
 for (const operator of ['++', '--']) {
-  test(`路由提取器识别后缀 ${operator} 后除法中的 command`, () => {
-    const source = "async function main(argv) {\n"
-      + "  const [command] = argv;\n"
-      + `  const result = total${operator} / command / divisor;\n`
-      + '}';
+  test(`路由提取器拒绝后缀 ${operator} 除法绕过`, () => {
+    const source = createCanonicalMain([
+      ...canonicalKnownRoute,
+      `  const result = total${operator} / command / divisor;`,
+    ]);
 
-    assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
-  });
-
-  test(`路由提取器识别前缀 ${operator} 后除法中的 command`, () => {
-    const source = "async function main(argv) {\n"
-      + "  const [command] = argv;\n"
-      + `  const result = ${operator}total / command / divisor;\n`
-      + '}';
-
-    assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+    assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
   });
 }
 
-test('路由提取器对无法分类前后缀的递增运算符失败关闭', () => {
-  const source = "async function main(argv) {\n"
-    + "  const [command] = argv;\n"
-    + '  const invalid = target. ++total;\n'
-    + '}';
+test('路由提取器拒绝未知顶层缩进和 multiline 条件', () => {
+  const unknownIndent = createCanonicalMain([...canonicalKnownRoute, '   dispatch(command);']);
+  const multilineCondition = createCanonicalMain([
+    ...canonicalKnownRoute,
+    '  if (',
+    "    command === 'extra'",
+    '  ) {',
+    '    return 0;',
+    '  }',
+  ]);
 
-  assert.throws(() => extractTopLevelCommandRoutes(source), /无法判断.*\+\+.*前缀.*后缀/u);
+  assert.throws(() => extractTopLevelCommandRoutes(unknownIndent), unknownRouteStructure);
+  assert.throws(() => extractTopLevelCommandRoutes(multilineCondition), unknownRouteStructure);
 });
 
-test('路由提取器保持其它多字符运算符的正则与除法上下文', () => {
-  const source = "async function main(argv) {\n"
-    + "  const [command] = argv;\n"
-    + '  const optional = source?.value / divisor;\n'
-    + '  const arrow = value => /command/.test(value);\n'
-    + '  const exponent = 2 ** /command/.source.length;\n'
-    + '  let pattern = left && /command/ || right ?? /command/;\n'
-    + '  pattern &&= /command/;\n'
-    + '  pattern ||= /command/;\n'
-    + '  pattern ??= /command/;\n'
-    + '  pattern += /command/.source;\n'
-    + "  if (command === 'known') { return 0; }\n"
-    + '}';
+test('路由提取器拒绝非规范分支体缩进', () => {
+  const source = createCanonicalMain([
+    "  if (command === 'known') {",
+    '   return 0;',
+    '  }',
+  ]);
 
-  assert.deepEqual(extractTopLevelCommandRoutes(source), ['known']);
+  assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
 });
-
-const multiCharacterOperatorCommandCases = [
-  'source?.value / command',
-  'value => value / command',
-  'base ** exponent / command',
-  'left && right / command',
-  'left || right / command',
-  'left ?? right / command',
-  'total += command',
-  'total /= command',
-];
-
-for (const expression of multiCharacterOperatorCommandCases) {
-  test(`路由提取器不隐藏多字符运算符后的 command：${expression}`, () => {
-    const source = "async function main(argv) {\n"
-      + "  const [command] = argv;\n"
-      + `  const result = ${expression};\n`
-      + '}';
-
-    assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
-  });
-}
 
 test('真实命令契约按登记顺序加载', async () => {
   const contract = await loadCommandContract();
