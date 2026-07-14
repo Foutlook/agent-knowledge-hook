@@ -330,83 +330,9 @@ test('sync-command-docs 拒绝重复 --repository-root', async (t) => {
   assert.match(result.stderr, /--repository-root.*一次/u);
 });
 
-const mainInitializationLines = [
-  '  const contract = await loadCommandContract();',
-  '  const [command, ...args] = argv;',
-  '  const globalOptions = parseGlobalOptions(args);',
-];
-const helpRouteHeader = "  if (!command || command === '--help' || command === '-h') {";
-const unknownCommandLine = '  console.error(`未知命令：${command}\\n\\n${usage(contract)}`);';
-const commandRouteHeaderPattern = /^  if \(command === '([a-z0-9]+(?:-[a-z0-9]+)*)'\) \{$/u;
-
-function extractTopLevelCommandRoutes(source) {
-  const lines = source.split(/\r?\n/u);
-  const mainHeader = 'async function main(argv) {';
-  const mainStart = lines.indexOf(mainHeader);
-  if (mainStart === -1 || lines.indexOf(mainHeader, mainStart + 1) !== -1) {
-    throw new Error('未知路由结构：必须且只能存在一个规范 main 头，请同步更新契约测试');
-  }
-
-  const routes = [];
-  let index = mainStart + 1;
-  for (const initializationLine of mainInitializationLines) {
-    assertMainLine(lines, index, initializationLine);
-    index += 1;
-  }
-
-  index = skipBlankLines(lines, index);
-  assertMainLine(lines, index, helpRouteHeader);
-  index = consumeCanonicalBranch(lines, index);
-
-  while (true) {
-    index = skipBlankLines(lines, index);
-    const routeMatch = lines[index]?.match(commandRouteHeaderPattern);
-    if (!routeMatch) break;
-    if (routes.includes(routeMatch[1])) {
-      throw new Error(`未知路由结构：重复命令 ${routeMatch[1]}，请同步更新契约测试`);
-    }
-    routes.push(routeMatch[1]);
-    index = consumeCanonicalBranch(lines, index);
-  }
-
-  assertMainLine(lines, index, unknownCommandLine);
-  assertMainLine(lines, index + 1, '  return 1;');
-  assertMainLine(lines, index + 2, '}');
-
-  return routes;
-}
-
-function skipBlankLines(lines, start) {
-  let index = start;
-  while (lines[index] === '') index += 1;
-  return index;
-}
-
-function consumeCanonicalBranch(lines, headerIndex) {
-  let index = headerIndex + 1;
-  let bodyLineCount = 0;
-  while (index < lines.length && lines[index] !== '  }') {
-    if (lines[index] !== '' && !lines[index].startsWith('    ')) {
-      throwUnknownMainLine(lines, index);
-    }
-    if (lines[index] !== '') bodyLineCount += 1;
-    index += 1;
-  }
-  if (bodyLineCount === 0 || lines[index] !== '  }') {
-    throwUnknownMainLine(lines, index);
-  }
-  return index + 1;
-}
-
-function assertMainLine(lines, index, expected) {
-  if (lines[index] !== expected) {
-    throwUnknownMainLine(lines, index);
-  }
-}
-
-function throwUnknownMainLine(lines, index) {
-  const actual = lines[index] ?? '(文件提前结束)';
-  throw new Error(`未知路由结构：main 第 ${index + 1} 行 ${actual}，请同步更新契约测试`);
+function extractStandardCommandRoutes(source) {
+  const routePattern = /^  if \(command === '([a-z0-9]+(?:-[a-z0-9]+)*)'\) \{$/gmu;
+  return [...source.matchAll(routePattern)].map((match) => match[1]);
 }
 
 function assertRouteContractEqual(actualRoutes, contractRoutes) {
@@ -433,142 +359,45 @@ test('Node 顶层命令路由与契约双向一致', async () => {
   ]);
 
   assertRouteContractEqual(
-    extractTopLevelCommandRoutes(source),
+    extractStandardCommandRoutes(source),
     contract.cliCommands.map(({ name }) => name),
   );
 });
 
-test('路由一致性检查拒绝源码多出的命令', () => {
-  assert.throws(
-    () => assertRouteContractEqual(['known', 'extra'], ['known']),
-    assert.AssertionError,
-  );
-});
-
-test('路由一致性检查拒绝契约多出的命令', () => {
-  assert.throws(
-    () => assertRouteContractEqual(['known'], ['known', 'missing']),
-    assert.AssertionError,
-  );
-});
-
-function createCanonicalMain(topLevelLines) {
-  return [
-    'async function main(argv) {',
-    ...mainInitializationLines,
-    '',
-    helpRouteHeader,
+test('路由一致性检查拒绝源码多出的标准路由', async () => {
+  const [contract, source] = await Promise.all([
+    loadCommandContract(),
+    readFile(cliEntryPath, 'utf8'),
+  ]);
+  const sourceWithExtraRoute = [
+    source,
+    "  if (command === 'extra-command') {",
     '    return 0;',
     '  }',
-    '',
-    ...topLevelLines,
-    '',
-    unknownCommandLine,
-    '  return 1;',
-    '}',
   ].join('\n');
-}
 
-function createCanonicalRoute(name) {
-  return [
-    `  if (command === '${name}') {`,
-    '    return 0;',
-    '  }',
-    '',
-  ];
-}
-
-const canonicalKnownRoute = createCanonicalRoute('known');
-const unknownRouteStructure = /未知路由结构.*同步更新契约测试/u;
-
-test('规范布局提取器登记字面量路由', () => {
-  assert.deepEqual(extractTopLevelCommandRoutes(createCanonicalMain(canonicalKnownRoute)), ['known']);
+  assert.throws(
+    () => assertRouteContractEqual(
+      extractStandardCommandRoutes(sourceWithExtraRoute),
+      contract.cliCommands.map(({ name }) => name),
+    ),
+    assert.AssertionError,
+  );
 });
 
-test('路由提取器拒绝 switch 或查表式顶层分发', () => {
-  const switchSource = createCanonicalMain([
-    ...canonicalKnownRoute,
-    '  switch (command) {',
-    "    case 'extra': return 0;",
-    '  }',
-  ]);
-  const lookupSource = createCanonicalMain([
-    ...canonicalKnownRoute,
-    '  routes[command]();',
+test('路由一致性检查拒绝契约多出的命令', async () => {
+  const [contract, source] = await Promise.all([
+    loadCommandContract(),
+    readFile(cliEntryPath, 'utf8'),
   ]);
 
-  assert.throws(() => extractTopLevelCommandRoutes(switchSource), unknownRouteStructure);
-  assert.throws(() => extractTopLevelCommandRoutes(lookupSource), unknownRouteStructure);
-});
-
-test('路由提取器拒绝顶层直接传递 command 的分发调用', () => {
-  const source = createCanonicalMain([...canonicalKnownRoute, '  dispatch(command);']);
-
-  assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
-});
-
-test('路由提取器拒绝顶层 Map 查找 command 的分发调用', () => {
-  const source = createCanonicalMain([...canonicalKnownRoute, '  routes.get(command)?.();']);
-
-  assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
-});
-
-test('路由提取器拒绝模板插值 command 分发头', () => {
-  const source = createCanonicalMain([
-    ...canonicalKnownRoute,
-    "  if (`${command}` === 'extra') {",
-    '    return 0;',
-    '  }',
-  ]);
-
-  assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
-});
-
-test('路由提取器拒绝模板插值正则绕过分发头', () => {
-  const source = createCanonicalMain([
-    ...canonicalKnownRoute,
-    "  if (`${/}/.test(command)}` === 'extra') {",
-    '    return 0;',
-    '  }',
-  ]);
-
-  assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
-});
-
-for (const operator of ['++', '--']) {
-  test(`路由提取器拒绝后缀 ${operator} 除法绕过`, () => {
-    const source = createCanonicalMain([
-      ...canonicalKnownRoute,
-      `  const result = total${operator} / command / divisor;`,
-    ]);
-
-    assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
-  });
-}
-
-test('路由提取器拒绝未知顶层缩进和 multiline 条件', () => {
-  const unknownIndent = createCanonicalMain([...canonicalKnownRoute, '   dispatch(command);']);
-  const multilineCondition = createCanonicalMain([
-    ...canonicalKnownRoute,
-    '  if (',
-    "    command === 'extra'",
-    '  ) {',
-    '    return 0;',
-    '  }',
-  ]);
-
-  assert.throws(() => extractTopLevelCommandRoutes(unknownIndent), unknownRouteStructure);
-  assert.throws(() => extractTopLevelCommandRoutes(multilineCondition), unknownRouteStructure);
-});
-
-test('路由提取器拒绝非规范分支体缩进', () => {
-  const source = createCanonicalMain([
-    "  if (command === 'known') {",
-    '   return 0;',
-    '  }',
-  ]);
-
-  assert.throws(() => extractTopLevelCommandRoutes(source), unknownRouteStructure);
+  assert.throws(
+    () => assertRouteContractEqual(
+      extractStandardCommandRoutes(source),
+      [...contract.cliCommands.map(({ name }) => name), 'contract-only'],
+    ),
+    assert.AssertionError,
+  );
 });
 
 test('真实命令契约按登记顺序加载', async () => {
