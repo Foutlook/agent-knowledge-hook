@@ -594,6 +594,32 @@ test('PowerShell 基础帮助严格拒绝非法 UTF-8 契约', async (t) => {
 
 const invalidPowerShellContractCases = [
   {
+    name: '含大写字母的命令名',
+    mutate(contract) {
+      contract.cliCommands[0].name = 'Search';
+      contract.akCommands[0].mapsTo = 'Search';
+    },
+    error: /cliCommands\[0\]\.name/u,
+  },
+  {
+    name: '大写 writeMode',
+    mutate(contract) { contract.cliCommands[0].writeMode = 'NEVER'; },
+    error: /cliCommands\[0\]\.writeMode/u,
+  },
+  {
+    name: '大小写不一致的 CLI mapsTo',
+    mutate(contract) {
+      contract.cliCommands[0].name = 'search';
+      contract.akCommands[0].mapsTo = 'SEARCH';
+    },
+    error: /akCommands\[0\]\.mapsTo/u,
+  },
+  {
+    name: '大小写错误的白名单 wrapper',
+    mutate(contract) { contract.akCommands[0].mapsTo = 'wrapper:PROJECTS'; },
+    error: /akCommands\[0\]\.mapsTo/u,
+  },
+  {
     name: '未知版本',
     mutate(contract) { contract.version = 2; },
     error: /version/u,
@@ -664,6 +690,22 @@ for (const { name, mutate, error } of invalidPowerShellContractCases) {
     assert.doesNotMatch(result.stdout, /Commands:/u);
   });
 }
+
+test('PowerShell 基础帮助允许仅大小写不同的 id', async (t) => {
+  const contract = createValidContract();
+  contract.cliCommands[0].id = 'foo';
+  contract.cliCommands.push({
+    ...contract.cliCommands[0],
+    id: 'FOO',
+    name: 'other-command',
+  });
+  const { scriptPath } = await createPowerShellTool(t, contract);
+
+  const result = runPowerShellAkHelp(scriptPath);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.replaceAll('\r\n', '\n').trimEnd(), renderAkBasicUsage(contract));
+});
 
 test('真实命令契约按登记顺序加载', async () => {
   const contract = await loadCommandContract();

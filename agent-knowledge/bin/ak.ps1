@@ -29,7 +29,7 @@ function Assert-CommandContractName {
     [string] $Context
   )
 
-  if ($Value -notmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
+  if ($Value -cnotmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
     throw "$Context must use lowercase letters, digits, and single hyphen separators"
   }
 }
@@ -45,8 +45,8 @@ function Assert-CommandContractCollection {
     throw "Command contract field $CollectionName must be an array"
   }
 
-  $ids = @{}
-  $names = @{}
+  $ids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+  $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
   for ($index = 0; $index -lt $Commands.Count; $index++) {
     $command = $Commands[$index]
     $context = "${CollectionName}[$index]"
@@ -60,20 +60,18 @@ function Assert-CommandContractCollection {
     }
     Assert-CommandContractName -Value $command.name -Context "$context.name"
 
-    if (@("never", "always", "conditional") -notcontains $command.writeMode) {
+    if (@("never", "always", "conditional") -cnotcontains $command.writeMode) {
       throw "$context.writeMode must be never, always, or conditional"
     }
     if ($command.jsonOutput -isnot [bool]) {
       throw "$context.jsonOutput must be boolean"
     }
-    if ($ids.ContainsKey($command.id)) {
+    if (-not $ids.Add($command.id)) {
       throw "$context.id duplicates an existing id: $($command.id)"
     }
-    if ($names.ContainsKey($command.name)) {
+    if (-not $names.Add($command.name)) {
       throw "$context.name duplicates an existing command name: $($command.name)"
     }
-    $ids[$command.id] = $true
-    $names[$command.name] = $context
 
     if ($IsAkCommand) {
       if ($command.aliases -isnot [System.Array]) {
@@ -112,11 +110,11 @@ function Assert-CommandContract {
   Assert-CommandContractCollection -Commands $Contract.akCommands -CollectionName "akCommands" -IsAkCommand $true
 
   # PowerShell resolves primary commands and aliases in one namespace, so all route names must be unique.
-  $names = @{}
+  $names = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
   for ($index = 0; $index -lt $Contract.akCommands.Count; $index++) {
-    $names[$Contract.akCommands[$index].name] = "akCommands[$index].name"
+    $names.Add($Contract.akCommands[$index].name, "akCommands[$index].name")
   }
-  $aliases = @{}
+  $aliases = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
   for ($commandIndex = 0; $commandIndex -lt $Contract.akCommands.Count; $commandIndex++) {
     $command = $Contract.akCommands[$commandIndex]
     for ($aliasIndex = 0; $aliasIndex -lt $command.aliases.Count; $aliasIndex++) {
@@ -128,18 +126,18 @@ function Assert-CommandContract {
       if ($aliases.ContainsKey($alias)) {
         throw "$context conflicts with alias $($aliases[$alias]): $alias"
       }
-      $aliases[$alias] = $context
+      $aliases.Add($alias, $context)
     }
   }
 
-  $cliNames = @{}
+  $cliNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
   foreach ($command in $Contract.cliCommands) {
-    $cliNames[$command.name] = $true
+    [void] $cliNames.Add($command.name)
   }
   $allowedWrappers = @("wrapper:projects", "wrapper:raw")
   for ($index = 0; $index -lt $Contract.akCommands.Count; $index++) {
     $mapsTo = $Contract.akCommands[$index].mapsTo
-    if (-not $cliNames.ContainsKey($mapsTo) -and $allowedWrappers -notcontains $mapsTo) {
+    if (-not $cliNames.Contains($mapsTo) -and $allowedWrappers -cnotcontains $mapsTo) {
       throw "akCommands[$index].mapsTo must reference a registered CLI command or allowed wrapper: $mapsTo"
     }
   }
