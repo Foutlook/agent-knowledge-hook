@@ -113,6 +113,8 @@ ak bug --help
 | `sync-command-docs [--check] --repository-root <path>` | 同步或检查生成的命令文档 | 视参数而定 |
 <!-- END GENERATED: CLI_COMMAND_TABLE -->
 
+`before-task`、`search`、`check-stale`、`doctor` 支持 `--json`，以 JSON 输出结构化结果，便于自动化管线消费。
+
 任务开始前读取知识：
 
 ```powershell
