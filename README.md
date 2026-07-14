@@ -242,7 +242,7 @@ macOS / Linux Shell 包装器：
 - `agent-knowledge/tool-adapters/`：Codex / Claude / OpenCode 接入说明。
 - `agent-knowledge/help/`：PowerShell 短命令中文帮助。
 - `.opencode/command/`：OpenCode 命令入口。
-- `.github/workflows/agent-knowledge-ci.yml`：测试、适配器漂移检查和示例知识库健康检查。
+- `.github/workflows/agent-knowledge-ci.yml`：测试、命令文档漂移检查、适配器漂移检查和示例知识库健康检查。
 - `docs/superpowers/`：设计文档和实施计划。
 - `AGENT.md`：通用 AI 使用规范和知识库钩子入口规则。
 
@@ -251,6 +251,7 @@ macOS / Linux Shell 包装器：
 ```powershell
 Push-Location agent-knowledge
 npm.cmd run test
+node bin/agent-knowledge.js sync-command-docs --check --repository-root ..
 Pop-Location
 
 node agent-knowledge/bin/agent-knowledge.js sync-adapters --check --repository-root .
