@@ -434,6 +434,19 @@ function* iterateJavaScriptCode(source, start = 0) {
     } else if (character === '/' && next === '*') {
       states.push({ type: 'block-comment' });
       index += 1;
+    } else if ((character === '+' && next === '+') || (character === '-' && next === '-')) {
+      const operator = `${character}${next}`;
+      if (state.slashContext === 'ambiguous') {
+        throw new Error(`无法判断 ${operator} 是前缀还是后缀运算符，请更新路由提取器`);
+      }
+      const nextSlashContext = state.slashContext === 'after-value'
+        ? 'after-value'
+        : 'expression-start';
+      // 递增/递减必须作为一个 token 消费，否则第二个字符会覆盖第一个字符确定的前后缀语义。
+      yield { index, character };
+      index += 1;
+      yield { index, character: next };
+      state.slashContext = nextSlashContext;
     } else if (character === '/') {
       if (state.slashContext === 'expression-start') {
         states.push({ type: 'regex', inCharacterClass: false });
@@ -455,7 +468,7 @@ function* iterateJavaScriptCode(source, start = 0) {
       state.slashContext = regexPrefixKeywords.has(identifier) ? 'expression-start' : 'after-value';
       yield { index, character };
     } else {
-      updateSlashContextForPunctuation(state, character, next);
+      updateSlashContextForPunctuation(state, character);
       yield { index, character };
     }
   }
@@ -478,7 +491,7 @@ function markParentAsValue(states) {
   }
 }
 
-function updateSlashContextForPunctuation(state, character, next) {
+function updateSlashContextForPunctuation(state, character) {
   if (/\s/u.test(character)) return;
   if (/[0-9]/u.test(character) || [')', ']'].includes(character)) {
     state.slashContext = 'after-value';
@@ -486,10 +499,6 @@ function updateSlashContextForPunctuation(state, character, next) {
     state.slashContext = 'ambiguous';
   } else if (character === '}') {
     state.slashContext = 'ambiguous';
-  } else if (character === '+' && next === '+' && state.slashContext === 'after-value') {
-    state.slashContext = 'after-value';
-  } else if (character === '-' && next === '-' && state.slashContext === 'after-value') {
-    state.slashContext = 'after-value';
   } else {
     // 开分隔符、赋值符和普通运算符之后都需要一个新表达式，正则字面量在这些位置合法。
     state.slashContext = 'expression-start';
@@ -766,6 +775,74 @@ test('路由提取器对无法分类的斜杠失败关闭', () => {
 
   assert.throws(() => extractTopLevelCommandRoutes(source), /无法判断.*正则.*除法/u);
 });
+
+for (const operator of ['++', '--']) {
+  test(`路由提取器识别后缀 ${operator} 后除法中的 command`, () => {
+    const source = "async function main(argv) {\n"
+      + "  const [command] = argv;\n"
+      + `  const result = total${operator} / command / divisor;\n`
+      + '}';
+
+    assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+  });
+
+  test(`路由提取器识别前缀 ${operator} 后除法中的 command`, () => {
+    const source = "async function main(argv) {\n"
+      + "  const [command] = argv;\n"
+      + `  const result = ${operator}total / command / divisor;\n`
+      + '}';
+
+    assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+  });
+}
+
+test('路由提取器对无法分类前后缀的递增运算符失败关闭', () => {
+  const source = "async function main(argv) {\n"
+    + "  const [command] = argv;\n"
+    + '  const invalid = target. ++total;\n'
+    + '}';
+
+  assert.throws(() => extractTopLevelCommandRoutes(source), /无法判断.*\+\+.*前缀.*后缀/u);
+});
+
+test('路由提取器保持其它多字符运算符的正则与除法上下文', () => {
+  const source = "async function main(argv) {\n"
+    + "  const [command] = argv;\n"
+    + '  const optional = source?.value / divisor;\n'
+    + '  const arrow = value => /command/.test(value);\n'
+    + '  const exponent = 2 ** /command/.source.length;\n'
+    + '  let pattern = left && /command/ || right ?? /command/;\n'
+    + '  pattern &&= /command/;\n'
+    + '  pattern ||= /command/;\n'
+    + '  pattern ??= /command/;\n'
+    + '  pattern += /command/.source;\n'
+    + "  if (command === 'known') { return 0; }\n"
+    + '}';
+
+  assert.deepEqual(extractTopLevelCommandRoutes(source), ['known']);
+});
+
+const multiCharacterOperatorCommandCases = [
+  'source?.value / command',
+  'value => value / command',
+  'base ** exponent / command',
+  'left && right / command',
+  'left || right / command',
+  'left ?? right / command',
+  'total += command',
+  'total /= command',
+];
+
+for (const expression of multiCharacterOperatorCommandCases) {
+  test(`路由提取器不隐藏多字符运算符后的 command：${expression}`, () => {
+    const source = "async function main(argv) {\n"
+      + "  const [command] = argv;\n"
+      + `  const result = ${expression};\n`
+      + '}';
+
+    assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+  });
+}
 
 test('真实命令契约按登记顺序加载', async () => {
   const contract = await loadCommandContract();
