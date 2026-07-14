@@ -400,53 +400,189 @@ function extractTopLevelCommandRoutes(source) {
   const bodyEnd = findMatchingDelimiter(source, bodyStart, '{', '}');
   const body = source.slice(bodyStart + 1, bodyEnd);
   const routes = [];
-  let depth = 0;
+  let index = 0;
 
-  for (let index = 0; index < body.length; index += 1) {
-    if (body[index] === '{') {
-      depth += 1;
+  while (index < body.length) {
+    index = skipWhitespaceAndComments(body, index);
+    if (index >= body.length) break;
+
+    if (!startsWithKeyword(body, index, 'if')) {
+      const statementEnd = findTopLevelStatementEnd(body, index);
+      const statement = body.slice(index, statementEnd);
+      const commandDeclaration = /^const\s*\[\s*command(?:\s*,\s*\.\.\.[A-Za-z_$][\w$]*)?\s*\]\s*=\s*argv\s*;$/u;
+      if (containsCodeIdentifier(statement, 'command') && !commandDeclaration.test(statement.trim())) {
+        throw new Error(`未知路由结构：${statement.trim()}，请同步更新契约测试`);
+      }
+      index = statementEnd;
       continue;
     }
-    if (body[index] === '}') {
-      depth -= 1;
-      continue;
-    }
-    if (depth !== 0) continue;
 
-    if (/\bswitch\s*\(\s*command\s*\)/u.test(body.slice(index))) {
-      throw new Error('未知路由结构：switch (command)，请同步更新契约测试');
+    const conditionStart = skipWhitespaceAndComments(body, index + 'if'.length);
+    if (body[conditionStart] !== '(') {
+      throw new Error('未知路由结构：if 缺少条件括号，请同步更新契约测试');
     }
-
-    const rest = body.slice(index);
-    const ifMatch = rest.match(/^\s*if\s*\(/u);
-    if (!ifMatch) continue;
-    const conditionStart = index + ifMatch[0].lastIndexOf('(');
     const conditionEnd = findMatchingDelimiter(body, conditionStart, '(', ')');
     const condition = body.slice(conditionStart + 1, conditionEnd).trim();
-    index = conditionEnd;
+    const branchStart = skipWhitespaceAndComments(body, conditionEnd + 1);
+    if (body[branchStart] !== '{') {
+      throw new Error(`未知路由结构：if (${condition})，请同步更新契约测试`);
+    }
+    const branchEnd = findMatchingDelimiter(body, branchStart, '{', '}');
 
     if (condition === "!command || command === '--help' || command === '-h'") {
-      continue;
-    }
-    const routeMatch = condition.match(/^command === '([a-z0-9]+(?:-[a-z0-9]+)*)'$/u);
-    if (!routeMatch) {
-      if (/\bcommand\b/u.test(condition)) {
-        throw new Error(`未知路由结构：${condition}，请同步更新契约测试`);
+      index = branchEnd + 1;
+    } else {
+      const routeMatch = condition.match(/^command === '([a-z0-9]+(?:-[a-z0-9]+)*)'$/u);
+      if (!routeMatch) {
+        if (containsCodeIdentifier(condition, 'command')) {
+          throw new Error(`未知路由结构：${condition}，请同步更新契约测试`);
+        }
+      } else {
+        routes.push(routeMatch[1]);
       }
-      continue;
+      index = branchEnd + 1;
     }
-    routes.push(routeMatch[1]);
-  }
 
-  const topLevelWithoutAllowedIfs = body.replace(
-    /^\s*if\s*\(\s*(?:!command\s*\|\|\s*command\s*===\s*'--help'\s*\|\|\s*command\s*===\s*'-h'|command\s*===\s*'[a-z0-9]+(?:-[a-z0-9]+)*')\s*\)/gmu,
-    'if (true)',
-  );
-  if (/\bswitch\s*\(\s*command\s*\)|\b\w+\s*\[\s*command\s*\]\s*\(/u.test(topLevelWithoutAllowedIfs)) {
-    throw new Error('未知路由结构：检测到未登记的 command 顶层分发，请同步更新契约测试');
+    const afterBranch = skipWhitespaceAndComments(body, index);
+    if (startsWithKeyword(body, afterBranch, 'else')) {
+      throw new Error('未知路由结构：顶层路由不允许 else，请同步更新契约测试');
+    }
   }
 
   return routes;
+}
+
+function skipWhitespaceAndComments(source, start) {
+  let index = start;
+  while (index < source.length) {
+    if (/\s/u.test(source[index])) {
+      index += 1;
+    } else if (source.startsWith('//', index)) {
+      const newlineIndex = source.indexOf('\n', index + 2);
+      index = newlineIndex === -1 ? source.length : newlineIndex + 1;
+    } else if (source.startsWith('/*', index)) {
+      const commentEnd = source.indexOf('*/', index + 2);
+      if (commentEnd === -1) throw new Error('main 中存在未闭合块注释');
+      index = commentEnd + 2;
+    } else {
+      break;
+    }
+  }
+  return index;
+}
+
+function startsWithKeyword(source, index, keyword) {
+  return source.startsWith(keyword, index)
+    && !/[\w$]/u.test(source[index - 1] ?? '')
+    && !/[\w$]/u.test(source[index + keyword.length] ?? '');
+}
+
+function findTopLevelStatementEnd(source, start) {
+  let parentheses = 0;
+  let brackets = 0;
+  let braces = 0;
+  let state = 'code';
+
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (state === 'line-comment') {
+      if (character === '\n') state = 'code';
+      continue;
+    }
+    if (state === 'block-comment') {
+      if (character === '*' && next === '/') {
+        state = 'code';
+        index += 1;
+      }
+      continue;
+    }
+    if (state !== 'code') {
+      if (character === '\\') {
+        index += 1;
+      } else if ((state === 'single-quote' && character === "'")
+          || (state === 'double-quote' && character === '"')
+          || (state === 'template' && character === '`')) {
+        state = 'code';
+      }
+      continue;
+    }
+    if (character === '/' && next === '/') {
+      state = 'line-comment';
+      index += 1;
+    } else if (character === '/' && next === '*') {
+      state = 'block-comment';
+      index += 1;
+    } else if (character === "'") {
+      state = 'single-quote';
+    } else if (character === '"') {
+      state = 'double-quote';
+    } else if (character === '`') {
+      state = 'template';
+    } else if (character === '(') {
+      parentheses += 1;
+    } else if (character === ')') {
+      parentheses -= 1;
+    } else if (character === '[') {
+      brackets += 1;
+    } else if (character === ']') {
+      brackets -= 1;
+    } else if (character === '{') {
+      braces += 1;
+    } else if (character === '}') {
+      braces -= 1;
+    } else if (character === ';' && parentheses === 0 && brackets === 0 && braces === 0) {
+      return index + 1;
+    }
+  }
+  return source.length;
+}
+
+function containsCodeIdentifier(source, identifier) {
+  let state = 'code';
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (state === 'line-comment') {
+      if (character === '\n') state = 'code';
+      continue;
+    }
+    if (state === 'block-comment') {
+      if (character === '*' && next === '/') {
+        state = 'code';
+        index += 1;
+      }
+      continue;
+    }
+    if (state !== 'code') {
+      if (character === '\\') {
+        index += 1;
+      } else if ((state === 'single-quote' && character === "'")
+          || (state === 'double-quote' && character === '"')
+          || (state === 'template' && character === '`')) {
+        state = 'code';
+      }
+      continue;
+    }
+    if (character === '/' && next === '/') {
+      state = 'line-comment';
+      index += 1;
+    } else if (character === '/' && next === '*') {
+      state = 'block-comment';
+      index += 1;
+    } else if (character === "'") {
+      state = 'single-quote';
+    } else if (character === '"') {
+      state = 'double-quote';
+    } else if (character === '`') {
+      state = 'template';
+    } else if (/[A-Za-z_$]/u.test(character)) {
+      const identifierMatch = source.slice(index).match(/^[A-Za-z_$][\w$]*/u)[0];
+      if (identifierMatch === identifier) return true;
+      index += identifierMatch.length - 1;
+    }
+  }
+  return false;
 }
 
 function assertRouteContractEqual(actualRoutes, contractRoutes) {
@@ -504,6 +640,26 @@ test('路由提取器拒绝 switch 或查表式顶层分发', () => {
 
   assert.throws(() => extractTopLevelCommandRoutes(switchSource), /未知路由结构.*同步更新契约测试/u);
   assert.throws(() => extractTopLevelCommandRoutes(lookupSource), /未知路由结构.*同步更新契约测试/u);
+});
+
+test('路由提取器拒绝顶层直接传递 command 的分发调用', () => {
+  const source = `async function main(argv) {
+    const [command] = argv;
+    if (command === 'known') { return 0; }
+    dispatch(command);
+  }`;
+
+  assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+});
+
+test('路由提取器拒绝顶层 Map 查找 command 的分发调用', () => {
+  const source = `async function main(argv) {
+    const [command] = argv;
+    if (command === 'known') { return 0; }
+    routes.get(command)?.();
+  }`;
+
+  assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
 });
 
 test('真实命令契约按登记顺序加载', async () => {
