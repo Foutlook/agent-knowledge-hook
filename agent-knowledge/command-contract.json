@@ -1,0 +1,253 @@
+{
+  "version": 1,
+  "cliCommands": [
+    {
+      "id": "before-task",
+      "name": "before-task",
+      "args": "<text>",
+      "summary": "输出任务前知识提示",
+      "writeMode": "never",
+      "jsonOutput": true
+    },
+    {
+      "id": "search",
+      "name": "search",
+      "args": "<text>",
+      "summary": "搜索知识库",
+      "writeMode": "never",
+      "jsonOutput": true
+    },
+    {
+      "id": "add-rule",
+      "name": "add-rule",
+      "args": "<title> [--confirmed]",
+      "summary": "新增规则草稿或确认规则",
+      "writeMode": "always",
+      "jsonOutput": false
+    },
+    {
+      "id": "record-fix",
+      "name": "record-fix",
+      "args": "--type <bug|prd|tech> --title <title> [--target <path>]",
+      "summary": "记录修复经验",
+      "writeMode": "always",
+      "jsonOutput": false
+    },
+    {
+      "id": "check-stale",
+      "name": "check-stale",
+      "args": "--project-root <path> --knowledge-file <path> [--deep]",
+      "summary": "检查知识条目是否落后于项目 HEAD（--deep 比对 evidence_files）",
+      "writeMode": "never",
+      "jsonOutput": true
+    },
+    {
+      "id": "refresh-project",
+      "name": "refresh-project",
+      "args": "--project-root <path> --knowledge-file <path> [--summary <text>]",
+      "summary": "刷新项目知识元数据",
+      "writeMode": "always",
+      "jsonOutput": false
+    },
+    {
+      "id": "resolve-fix",
+      "name": "resolve-fix",
+      "args": "--file <path> [--confirm-legacy]",
+      "summary": "校验 targeted fix 已合并并归档审计工件",
+      "writeMode": "always",
+      "jsonOutput": false
+    },
+    {
+      "id": "promote",
+      "name": "promote",
+      "args": "--file <path>",
+      "summary": "将 inbox 待确认条目晋升到 knowledge（status 改为 confirmed）",
+      "writeMode": "always",
+      "jsonOutput": false
+    },
+    {
+      "id": "list-pending",
+      "name": "list-pending",
+      "args": "",
+      "summary": "列出 inbox 下所有待确认条目",
+      "writeMode": "never",
+      "jsonOutput": false
+    },
+    {
+      "id": "sync-adapters",
+      "name": "sync-adapters",
+      "args": "[--check]",
+      "summary": "同步或检查 OpenCode 命令适配器",
+      "writeMode": "conditional",
+      "jsonOutput": false
+    },
+    {
+      "id": "doctor",
+      "name": "doctor",
+      "args": "[--json]",
+      "summary": "只读检查知识库结构、引用、证据与适配器漂移",
+      "writeMode": "never",
+      "jsonOutput": true
+    },
+    {
+      "id": "sync-command-docs",
+      "name": "sync-command-docs",
+      "args": "[--check] --repository-root <path>",
+      "summary": "同步或检查生成的命令文档",
+      "writeMode": "conditional",
+      "jsonOutput": false
+    }
+  ],
+  "akCommands": [
+    {
+      "id": "task",
+      "name": "task",
+      "args": "<任务描述>",
+      "summary": "任务开始前检索相关知识",
+      "writeMode": "never",
+      "jsonOutput": true,
+      "aliases": ["before", "before-task"],
+      "mapsTo": "before-task"
+    },
+    {
+      "id": "search",
+      "name": "search",
+      "args": "<关键词>",
+      "summary": "主动搜索知识库",
+      "writeMode": "never",
+      "jsonOutput": true,
+      "aliases": ["s"],
+      "mapsTo": "search"
+    },
+    {
+      "id": "projects",
+      "name": "projects",
+      "args": "",
+      "summary": "列出知识库项目索引中的项目",
+      "writeMode": "never",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "wrapper:projects"
+    },
+    {
+      "id": "check",
+      "name": "check",
+      "args": "<项目名>",
+      "summary": "检查项目知识文件是否落后于项目当前 HEAD",
+      "writeMode": "never",
+      "jsonOutput": true,
+      "aliases": ["stale"],
+      "mapsTo": "check-stale"
+    },
+    {
+      "id": "refresh",
+      "name": "refresh",
+      "args": "<项目名> [说明]",
+      "summary": "刷新项目知识文件的元数据和刷新记录",
+      "writeMode": "always",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "refresh-project"
+    },
+    {
+      "id": "bug",
+      "name": "bug",
+      "args": "<标题> [--target <文件>]",
+      "summary": "记录 BUG 纠错到 inbox",
+      "writeMode": "always",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "record-fix"
+    },
+    {
+      "id": "prd",
+      "name": "prd",
+      "args": "<标题> [--target <文件>]",
+      "summary": "记录 PRD 纠偏到 inbox",
+      "writeMode": "always",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "record-fix"
+    },
+    {
+      "id": "tech",
+      "name": "tech",
+      "args": "<标题> [--target <文件>]",
+      "summary": "记录技术方案纠偏到 inbox",
+      "writeMode": "always",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "record-fix"
+    },
+    {
+      "id": "rule",
+      "name": "rule",
+      "args": "<规则标题> [--confirmed]",
+      "summary": "新增规则草稿或确认规则",
+      "writeMode": "always",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "add-rule"
+    },
+    {
+      "id": "promote",
+      "name": "promote",
+      "args": "<inbox文件>",
+      "summary": "晋升普通草稿或不带 target 的独立 fix",
+      "writeMode": "always",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "promote"
+    },
+    {
+      "id": "resolve",
+      "name": "resolve",
+      "args": "<文件> [--confirm-legacy]",
+      "summary": "确认 targeted fix 已合入目标并归档审计",
+      "writeMode": "always",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "resolve-fix"
+    },
+    {
+      "id": "pending",
+      "name": "pending",
+      "args": "",
+      "summary": "列出 inbox 下待确认条目",
+      "writeMode": "never",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "list-pending"
+    },
+    {
+      "id": "adapters",
+      "name": "adapters",
+      "args": "[--check]",
+      "summary": "同步或只读检查 OpenCode 命令适配器",
+      "writeMode": "conditional",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "sync-adapters"
+    },
+    {
+      "id": "doctor",
+      "name": "doctor",
+      "args": "[--json]",
+      "summary": "检查知识库结构、引用、证据和适配器漂移",
+      "writeMode": "never",
+      "jsonOutput": true,
+      "aliases": [],
+      "mapsTo": "doctor"
+    },
+    {
+      "id": "raw",
+      "name": "raw",
+      "args": "<原始参数>",
+      "summary": "透传到底层 agent-knowledge CLI",
+      "writeMode": "conditional",
+      "jsonOutput": false,
+      "aliases": [],
+      "mapsTo": "wrapper:raw"
+    }
+  ]
+}
