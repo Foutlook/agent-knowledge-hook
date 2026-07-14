@@ -25,7 +25,9 @@ ak task "分析实体图谱 ownerId 为空"
 ak check poseidon
 ak refresh poseidon "同步本次需求合并后的模块变化"
 ak bug "学习报告统计口径错误"
+ak resolve inbox/fixes/<纠错文件>.md
 ak rule "聚合接口实体集合和映射来源必须一致"
+ak doctor --json
 ```
 
 `ak help` 会直接输出中文详细帮助；`ak help <命令>` 或 `<命令> --help` 会输出单条命令的用途、适用场景、是否写文件和底层动作：
@@ -45,12 +47,15 @@ ak rule --help
 | `ak projects` | 列出项目索引中已登记的项目 |
 | `ak check <项目名>` | 自动执行项目知识过期检查 |
 | `ak refresh <项目名> [说明]` | 自动刷新项目知识元数据 |
-| `ak bug <标题>` | 记录 BUG 纠错到 inbox |
-| `ak prd <标题>` | 记录 PRD 纠错到 inbox |
-| `ak tech <标题>` | 记录技术方案纠错到 inbox |
+| `ak bug <标题> [--target <文件>]` | 记录 BUG 纠错到 inbox |
+| `ak prd <标题> [--target <文件>]` | 记录 PRD 纠错到 inbox |
+| `ak tech <标题> [--target <文件>]` | 记录技术方案纠错到 inbox |
+| `ak resolve <文件> [--confirm-legacy]` | 确认 targeted fix 已由目标正式知识吸收并归档审计 |
 | `ak rule <规则标题> [--confirmed]` | 新增规则草稿或确认规则 |
-| `ak promote <文件>` | 将 inbox 待确认条目晋升到 knowledge |
+| `ak promote <文件>` | 将普通草稿或不带 target 的独立 fix 晋升到 knowledge |
 | `ak pending` | 列出 inbox 下所有待确认条目 |
+| `ak adapters [--check]` | 同步或只读检查 OpenCode 命令适配器 |
+| `ak doctor [--json]` | 只读检查知识库健康状态 |
 | `ak raw <原始参数>` | 透传到底层 CLI |
 
 `ak check <项目名>` 和 `ak refresh <项目名>` 依赖项目知识文件中的 `project_root`，或 `knowledge/service-map/workspace-projects.md` 中的项目路径。真实团队使用时，推荐设置 `AGENT_KNOWLEDGE_ROOT` 或把 `team-agent-knowledge` 与 `agent-knowledge-hook` 放在同一工作区下。
@@ -65,23 +70,27 @@ ak rule --help
 agent-knowledge before-task <text>
 agent-knowledge search <text>
 agent-knowledge add-rule <title> [--confirmed]
-agent-knowledge record-fix --type <bug|prd|tech> --title <title>
+agent-knowledge record-fix --type <bug|prd|tech> --title <title> [--target <知识文件>]
+agent-knowledge resolve-fix --file <inbox纠偏文件> [--confirm-legacy]
 agent-knowledge check-stale --project-root <path> --knowledge-file <path> [--deep]
 agent-knowledge refresh-project --project-root <path> --knowledge-file <path> [--summary <text>]
 agent-knowledge promote --file <path>
 agent-knowledge list-pending
+agent-knowledge sync-adapters [--check] [--repository-root <path>]
+agent-knowledge doctor [--json] [--knowledge-root <path>] [--repository-root <path>]
 ```
 
 通用选项：
 
 ```text
 --knowledge-root <path>
+--repository-root <path>
 --json
 ```
 
 如果没有传 `--knowledge-root`，命令会优先读取环境变量 `AGENT_KNOWLEDGE_ROOT`；如果环境变量也不存在，则使用当前工具目录内置的示例知识库。
 
-`--json` 可用于 `before-task`、`search` 与 `check-stale`，把结果以结构化 JSON 输出（含 `mustRead`、`coverage`、`stale`、`snippet` 等字段），便于 OpenCode / Codex 等自动化管线直接解析，无需对文本做正则处理。
+`--json` 可用于 `before-task`、`search`、`check-stale` 与 `doctor`。其中 `doctor --json` 无论检查通过还是发现 error，都会在 stdout 输出唯一的合法 JSON 对象，便于自动化管线直接解析。
 
 ## 命令使用姿势
 
@@ -143,8 +152,15 @@ agent-knowledge add-rule "禁止在循环中逐条远程查询" --confirmed
 记录一次 BUG、PRD 或技术方案纠错：
 
 ```powershell
-agent-knowledge record-fix --type bug --title "实体图谱 ownerId 为空"
+agent-knowledge record-fix --type bug --title "实体图谱 ownerId 为空" --target knowledge/rules/entity-graph.md
 ```
+
+先判断被纠正对象的生命周期：
+
+- `inbox/` 中尚未确认的 `draft` / `pending` 草稿，直接修改原草稿，不额外创建 fix。
+- 已进入 `knowledge/` 的正式知识，或独立的业务分析、BUG 结论、已输出技术方案被纠正时，才创建 fix。
+- 已知被纠正的知识文件时使用 `--target` 建立关联；目标是未确认草稿时，命令会拒绝创建 fix，并提示直接修改原草稿。
+- 不得让同一结论同时以原草稿和 fix 两种待确认形态重复存在。
 
 `record-fix` 会根据 `--type` 写入不同的待确认目录：
 
@@ -154,7 +170,44 @@ agent-knowledge record-fix --type bug --title "实体图谱 ownerId 为空"
 | `prd` | `inbox/prd-corrections/` | 记录 PRD 口径、字段、流程或边界被纠正的情况 |
 | `tech` | `inbox/tech-solution-corrections/` | 记录技术方案设计、数据源、接口或性能策略被纠正的情况 |
 
-这些记录进入 inbox 后，不会自动成为长期规则。需求上线或问题闭环后，再由人工整理到 `knowledge/`。
+这些记录进入 inbox 后，不会自动成为长期规则。带 `--target` 的 targeted fix 会同时记录目标正式知识的基线哈希；`--target` 可以省略，用于没有对应知识文件、需要作为独立知识候选保留的纠偏。
+
+两类 fix 的最终动作不同：
+
+- targeted fix：人工或 Codex 基于证据修改原 `target`，审核语义正确后执行 `resolve-fix`；绝不能执行 `promote`，否则会制造第二份正式知识。
+- 不带 `target` 的独立 fix：人工确认它应成为独立长期知识后，才沿用 `promote`。
+
+目标哈希变化只能证明文件字节发生过变化，哈希变化不等于语义正确，也不能证明纠偏已被完整吸收；执行 `resolve-fix` 前仍必须人工审核目标正文。
+
+### resolve-fix
+
+关闭已经由正式知识吸收的 targeted fix：
+
+```powershell
+agent-knowledge resolve-fix --file inbox/tech-solution-corrections/<纠偏文件>.md
+ak resolve inbox/tech-solution-corrections/<纠偏文件>.md
+```
+
+推荐顺序：
+
+1. 阅读 targeted fix 的证据、失败点和纠偏结论。
+2. 人工或由已获授权的 Codex 工作流直接修改 `target` 指向的 `knowledge/` 正式知识。
+3. 完整审核目标正文，确认纠偏已经正确合入；不要只看 Git diff 或哈希变化。
+4. 对原 inbox 路径执行 `resolve-fix`。命令校验目标仍是 confirmed 且当前哈希不同于记录基线，但不会自动改写或语义合并目标。
+
+成功后生成三个互相配合、但都不属于可检索正式知识的工件：
+
+- `archive/source-survivors/<分类>/<文件>`（source survivor）：与处理中的 source 保持同一 inode，用于承接旧文件句柄可能产生的晚到写入，便于发现并发冲突。
+- `archive/resolved-sources/<分类>/<文件>`（source snapshot）：独立 inode 的只读字节快照，固定本次审计实际采用的纠偏原文。
+- `archive/resolved/<分类>/<文件>`（resolved audit）：`status: resolved` 的审计记录，保存目标基线/关闭哈希、source hash 和上述工件路径。
+
+旧版 targeted fix 如果缺少 `target_hash`，默认不能关闭。只有人工已经确认目标吸收了纠偏时，才显式执行：
+
+```powershell
+ak resolve inbox/<分类>/<旧纠偏文件>.md --confirm-legacy
+```
+
+命令中断或报告恢复/冲突状态时，不要手工删除、移动或晋升 `work/`、survivor、snapshot、resolved 工件；保留现场并用同一个 source 路径重试。若工件内容不一致、source 路径被复用或命令明确要求人工处理，应先人工审核全部保留版本再决定后续动作。
 
 ### check-stale
 
@@ -200,15 +253,15 @@ agent-knowledge refresh-project --project-root <workspace-root>\reasearch-hub --
 
 ### promote
 
-把 inbox 下的待确认条目晋升为已确认知识：移动到 `knowledge/` 下对应的子目录（映射规则为 `inbox/<sub>/file.md` → `knowledge/<sub>/file.md`），并把 frontmatter 的 `status` 改为 `confirmed`。
+把 inbox 下已经确认的普通草稿或不带 `target` 的独立 fix 晋升为已确认知识：移动到 `knowledge/` 下对应的子目录（映射规则为 `inbox/<sub>/file.md` → `knowledge/<sub>/file.md`），并把 frontmatter 的 `status` 改为 `confirmed`。
 
 ```powershell
 agent-knowledge promote --file inbox/rules/2026-07-09-aggregation-rule.md
 ```
 
-`promote` 只接受 `inbox/` 下的文件；若误传 `knowledge/` 下的文件会报错。晋升后原 inbox 文件会被删除，新文件落在 `knowledge/` 对应目录。如果团队还有「项目索引」或「规则索引」需要同步引用，晋升后可人工补一条索引引用。
+`promote` 只接受 `inbox/` 下的文件；若误传 `knowledge/` 下的文件会报错。带非空 `target` 的 targeted fix 会在任何写入前被拒绝：这类纠偏必须先修改目标正式知识，再执行 `resolve-fix`。普通规则草稿和不带 `target` 的独立 fix 仍可在人工确认后晋升。晋升后原 inbox 文件会被删除，新文件落在 `knowledge/` 对应目录。如果团队还有「项目索引」或「规则索引」需要同步引用，晋升后可人工补一条索引引用。
 
-典型节奏：纠错记录或规则草稿在 `inbox/` 沉淀一段时间后，由人工确认其长期有效性，再用 `promote` 晋升，避免 inbox 长期堆积未确认项。
+典型节奏：规则草稿或独立 fix 在 `inbox/` 沉淀一段时间后，由人工确认其长期有效性，再用 `promote` 晋升；targeted fix 则通过 `resolve-fix` 关闭，不得为了清理 inbox 而晋升。
 
 ### list-pending
 
@@ -220,18 +273,54 @@ agent-knowledge list-pending
 
 输出每行包含相对路径、`status`、`type` 与 `updated`，方便判断哪些条目已挂起过久、需要确认或清理。
 
+### sync-adapters
+
+同步或检查 OpenCode 命令适配器：
+
+```powershell
+agent-knowledge sync-adapters --repository-root <agent-knowledge-hook仓库>
+agent-knowledge sync-adapters --check --repository-root <agent-knowledge-hook仓库>
+```
+
+适配器的唯一模板来源固定为 `<repository-root>/agent-knowledge/templates/opencode/`，安装目标固定为 `<repository-root>/.opencode/command/`。`--knowledge-root` 不参与模板或目标解析，避免私有知识库位置改变适配器来源。`--check` 只读比较，不同步文件；发现目标缺失或内容漂移时退出 1。
+
+### doctor
+
+对 `knowledge/` 和 `inbox/` 下的 Markdown 做只读健康检查，并精确跳过说明文件 `inbox/README.md`：
+
+```powershell
+agent-knowledge doctor --knowledge-root <知识库根目录> --repository-root <agent-knowledge-hook仓库>
+ak doctor --json
+```
+
+检查范围包括 UTF-8 BOM、frontmatter、目录对应的 `status`、全局重复标题、`target` 引用、targeted fix 的 `target_hash` / `fix_id`、`project_root` / 逗号分隔的 `evidence_files`，以及 OpenCode 适配器漂移。`doctor` 还会只读诊断 `knowledge/`、`inbox/` 下的相邻 `*.md.lock` / `*.md.lock.reclaim`，以及固定目录 `work/locks/resolve/` 中名称为 64 位小写十六进制哈希的 `.lock` / `.lock.reclaim`；`notes.lock`、备份后缀和非哈希 resolve 文件不属于锁扫描范围。合法锁内容必须是完整的 `PID:RFC4122-UUID`，末尾可以没有换行或只有一个 LF / CRLF；活进程持有的合法锁不报告，PID 已退出或内容无法严格解析时给出 warning。锁扫描不跟随 symlink / junction，也不会越出知识库真实根。只有 `<repository-root>/.opencode/command/` 目录已经存在时才检查适配器；模板仍固定来自 `agent-knowledge/templates/opencode/`。`archive/` 与 `work/` 不进入知识正文扫描，`work/` 仅检查上述固定锁目录。
+
+问题严重级别和退出码：
+
+- `error`：`utf8_bom`、`missing_frontmatter`、`invalid_status`、`broken_target`、`invalid_target_hash`、`invalid_fix_id`、`adapter_drift`。存在任一 error 时 `ok=false`，进程退出 1。
+- `warning`：`duplicate_title`、`missing_project_root`、`missing_evidence_file`、`missing_target_hash`、`orphan_lock`、`invalid_lock`。只有 warning 时 `ok=true`，进程退出 0；`missing_target_hash` 表示旧版 targeted fix 关闭时需要显式 `--confirm-legacy`。
+- 检查不会修复、晋升、删除或重写任何文件。
+
+锁恢复与人工排查边界：
+
+- 普通主锁只有在新的调用成功持有相邻 reclaim guard、锁内容严格匹配 `PID:RFC4122-UUID` 且 owner PID 已退出时，才会按既有流程自动恢复；PID-only、BOM、额外内容或非法 UUID 都不会被删除。
+- orphan reclaim guard 不会自动删除。缺少可移植的 compare-and-unlink 语义时，自动回收 guard 可能产生 ABA 并误删后继进程的新 guard，因此后续锁获取会安全超时并保留现场。
+- `LOCK_TIMEOUT` 只表示在等待时间内无法安全取得锁，不表示该锁可以直接删除。先停止或确认没有相关任务运行，再用 `doctor` 核对锁路径和 PID，检查相邻恢复工件及锁内容，并在团队协调后人工处理；不要在无法确认 token 所属任务时强制解锁。
+
 ### --json
 
-`before-task`、`search`、`check-stale` 支持 `--json`，输出结构化结果：
+`before-task`、`search`、`check-stale`、`doctor` 支持 `--json`，输出结构化结果：
 
 ```powershell
 agent-knowledge search "graph-service 实体归属" --json
+agent-knowledge doctor --json
 ```
 
 各字段含义：
 
 - `before-task` / `search`：`results[].mustRead`（是否必须阅读）、`coverage`（查询词命中比例）、`matched` / `total`、`stale`、`staleReason`、`snippet`、`hits`。
 - `check-stale`：`scannedCommit`、`currentCommit`、`stale`、`reason`，以及 `--deep` 时的 `deep.hitFiles` 等。
+- `doctor`：`ok`、`checkedFiles` 与按 `file + code + message` 稳定排序的 `issues`。检查通过或失败时，stdout 都只输出一个合法 JSON 对象。
 
 ### --knowledge-root 与环境变量
 
@@ -259,14 +348,17 @@ node <workspace-root>\agent-knowledge-hook\agent-knowledge\bin\agent-knowledge.j
 3. 代码分析：回到真实项目确认入口、入参、最终数据源和赋值点。
 4. 更新正文：如果项目结构、服务边界或业务规则变化，先改知识文件正文。
 5. `refresh-project`：正文确认后刷新 `last_scanned_commit` 和刷新记录。
-6. `record-fix`：如果开发中被纠正了 BUG、PRD 或技术方案，写入 inbox。
-7. `add-rule`：如果形成长期规则，先进入 inbox；确认后再进入 `knowledge/rules/`。
+6. 纠错记录：未确认草稿被纠正时直接修改原草稿；正式知识被纠正时创建 targeted fix；独立业务结论被纠正时创建不带 `target` 的 fix。
+7. 纠错关闭：targeted fix 先修改并审核目标，再执行 `resolve-fix`；独立 fix 只有在确认应成为独立长期知识后才执行 `promote`。
+8. `add-rule`：如果形成长期规则，先进入 inbox；确认后再进入 `knowledge/rules/`。
 
 ## knowledge 与 inbox
 
 `knowledge/` 存放已经确认长期有效的知识，包括规则、业务知识、历史坑和服务映射。这里的内容可以作为任务分析的强约束，但仍要结合实际代码路径验证。
 
-`inbox/` 存放待确认材料，包括规则草稿、纠错记录、PRD 纠偏和技术方案纠偏。这里的内容是缓冲区，不能直接当成长期规则套用，必须经过人工确认后再整理进 `knowledge/`。
+`inbox/` 存放待确认材料，包括规则草稿、纠错记录、PRD 纠偏和技术方案纠偏。这里的内容是缓冲区，不能直接当成长期规则套用。普通草稿和独立 fix 经人工确认后可整理进 `knowledge/`；targeted fix 必须把结论合入原目标并通过 `resolve-fix` 关闭。
+
+`archive/` 存放 `resolve-fix` 产生的 source survivor、只读 source snapshot 和 resolved 审计记录；`work/` 存放锁与可恢复的处理中状态。两者都不参与 `before-task` / `search` 检索、必须阅读列表或 `list-pending`，也不能当成第二份正式知识。出现失败时保留这些工件，是为了让同一路径重试和人工冲突审核有完整证据。
 
 `add-rule` 默认写入 `inbox/rules/`，原因是新规则通常还没有经过代码、接口契约、线上问题或团队共识验证。先进入 inbox 可以避免把一次临时判断或个人偏好沉淀成仓库级强规则。
 
@@ -294,6 +386,13 @@ team-agent-knowledge/
     fixes/
     prd-corrections/
     tech-solution-corrections/
+  archive/
+    source-survivors/
+    resolved-sources/
+    resolved/
+  work/
+    resolving/
+    locks/
 ```
 
 ## 后续 MCP 服务化思路
@@ -312,6 +411,7 @@ team-agent-knowledge/
 | `record_bug_fix(title, detail)` | 调用 `record-fix --type bug`，把 BUG 纠错写入 `inbox/fixes/` |
 | `record_prd_correction(title, detail)` | 调用 `record-fix --type prd`，把需求口径纠偏写入 `inbox/prd-corrections/` |
 | `record_tech_correction(title, detail)` | 调用 `record-fix --type tech`，把技术方案纠偏写入 `inbox/tech-solution-corrections/` |
+| `resolve_targeted_fix(file, confirm_legacy)` | 在目标正文已人工审核后调用 `resolve-fix`，归档 targeted fix 的 survivor、snapshot 与 resolved 审计记录 |
 | `add_rule_draft(title, detail)` | 调用 `add-rule`，默认写入 `inbox/rules/` |
 
 推荐架构：
@@ -341,6 +441,10 @@ AI 工具 / Agent
 - `inbox/fixes/`：待确认 BUG 修复记录。
 - `inbox/prd-corrections/`：待确认 PRD 纠偏记录。
 - `inbox/tech-solution-corrections/`：待确认技术方案纠偏记录。
+- `archive/source-survivors/`：承接旧 source inode 晚到写入的保活工件，不参与检索。
+- `archive/resolved-sources/`：本次关闭采用的独立只读 source snapshot，不参与检索。
+- `archive/resolved/`：targeted fix 的 resolved 审计记录，不参与检索。
+- `work/`：`resolve-fix` 的锁和中断恢复状态，不参与检索或待确认清单。
 - `tool-adapters/`：不同 AI 工具的接入说明。
 - `help/`：短命令的中文详细帮助文本。
 - `tests/`：命令和知识库行为测试。
@@ -363,11 +467,15 @@ AI 工具 / Agent
 node agent-knowledge\bin\agent-knowledge.js search "RPC 本地依赖"
 ```
 
-无论从 Codex、Claude 还是 OpenCode 调用，都应遵循同一规则：先读 `before-task` 输出的必须阅读项，再分析代码；发生人工纠错后，用 `record-fix` 或模板把证据链沉淀到 `inbox/`。
+无论从 Codex、Claude 还是 OpenCode 调用，都应遵循同一规则：先读 `before-task` 输出的必须阅读项，再分析代码；发生人工纠错后先判断对象状态，未确认草稿直接修改，正式知识用 targeted fix 关联并在目标审核后 `resolve-fix`，独立结论才走独立 fix 的 `promote` 流程。哈希变化不是语义审核的替代品。
 
 ## 本地验证
 
-2026-07-06 在 Windows PowerShell 环境完成以下验证。以下命令均从仓库根目录执行，例如：
+仓库的 GitHub Actions 会在 `push` 和 `pull_request` 时运行测试、只读检查 OpenCode 适配器漂移，并对仓库打包的示例知识库执行 `doctor`。CI 不安装第三方依赖、不自动同步适配器，也不访问工作区外的私有 `team-agent-knowledge`。
+
+真实私有知识库只适合在具备访问权限的本地环境中额外执行只读 `doctor`，该结果属于非阻塞的环境检查，不作为跨环境 CI 门禁。
+
+2026-07-13 在 Windows PowerShell 环境完成以下验证。以下命令均从仓库根目录执行，例如：
 
 ```powershell
 cd <workspace-root>\agent-knowledge-hook
@@ -379,7 +487,7 @@ npm.cmd run test
 Pop-Location
 ```
 
-结果：`tests/*.test.js` 全部通过，31 个测试全部成功。测试覆盖 `add-rule` 默认写入临时 `rootDir` 下的 `inbox/rules/`，`--knowledge-root` / `AGENT_KNOWLEDGE_ROOT` 指向分离知识库，`check-stale` 检测知识文件落后于项目 HEAD（含 `--deep` 深度比对 `evidence_files`），`refresh-project` 刷新知识文件项目元数据，同义词扩展与中文 2-gram 切分召回，覆盖率排序与命中摘要，`promote` 晋升与 `list-pending` 待确认清单，`--json` 机读输出，以及 `record-fix` 输出到临时目录下的纠错目录，验证过程不会污染真实 `agent-knowledge/inbox`。
+结果：`tests/*.test.js` 全部通过。测试覆盖安全新建与原子更新、OpenCode 适配器同步/漂移检查、`doctor` 结构与引用检查、CLI/PowerShell 参数边界、targeted fix 关闭与中断恢复、JSON 机读输出，以及原有检索、纠错、刷新、晋升和待确认清单流程；验证过程不会污染真实 `agent-knowledge/inbox`。
 
 PowerShell 直接执行 `.ps1` 可能被执行策略拦截，因此本地验证使用 `-ExecutionPolicy Bypass` 显式运行包装器：
 

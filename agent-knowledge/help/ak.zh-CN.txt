@@ -26,11 +26,25 @@ ak check --help
 | `ak projects` | 列出知识库项目索引中的项目 | 否 |
 | `ak check <项目名>` | 检查项目知识文件是否落后于项目当前 HEAD | 否 |
 | `ak refresh <项目名> [说明]` | 刷新项目知识文件的元数据和刷新记录 | 是 |
-| `ak bug <标题>` | 记录 BUG 纠错到 inbox | 是 |
-| `ak prd <标题>` | 记录 PRD 纠偏到 inbox | 是 |
-| `ak tech <标题>` | 记录技术方案纠偏到 inbox | 是 |
+| `ak bug <标题> [--target <文件>]` | 记录 BUG 纠错到 inbox | 是 |
+| `ak prd <标题> [--target <文件>]` | 记录 PRD 纠偏到 inbox | 是 |
+| `ak tech <标题> [--target <文件>]` | 记录技术方案纠偏到 inbox | 是 |
+| `ak resolve <文件> [--confirm-legacy]` | 确认 targeted fix 已合入目标并归档审计 | 是 |
 | `ak rule <规则标题> [--confirmed]` | 新增规则草稿或确认规则 | 是 |
+| `ak promote <inbox文件>` | 晋升普通草稿或不带 target 的独立 fix | 是 |
+| `ak pending` | 列出 inbox 下待确认条目 | 否 |
+| `ak adapters [--check]` | 同步或只读检查 OpenCode 命令适配器 | `--check` 时否，否则是 |
+| `ak doctor [--json]` | 检查知识库结构、引用、证据和适配器漂移 | 否 |
 | `ak raw <原始参数>` | 透传到底层 `agent-knowledge` CLI | 取决于原始命令 |
+
+以下只读命令支持 `--json`：
+
+```powershell
+ak task "分析实体图谱 ownerId 为空" --json
+ak search "聚合接口 数据源一致" --json
+ak check poseidon --json
+ak doctor --json
+```
 
 ## task
 
@@ -194,12 +208,12 @@ agent-knowledge refresh-project --project-root <项目路径> --knowledge-file <
 用法：
 
 ```powershell
-ak bug "学习报告统计口径错误"
+ak bug "学习报告统计口径错误" --target knowledge/rules/learning-report.md
 ```
 
 作用：
 
-创建一条 BUG 修复纠错记录模板，写入 `inbox/fixes/`。
+创建一条 BUG 修复纠错记录模板，写入 `inbox/fixes/`。如果被纠正对象是未确认草稿，应直接修改原草稿，不创建本记录。
 
 什么时候用：
 
@@ -215,20 +229,22 @@ ak bug "学习报告统计口径错误"
 底层动作：
 
 ```text
-agent-knowledge record-fix --type bug --title <标题>
+agent-knowledge record-fix --type bug --title <标题> [--target <知识文件>]
 ```
+
+带 `--target` 时，先修改并审核目标，再用 `ak resolve <生成的inbox文件>` 关闭，绝不能 `promote`；不带 `target` 的独立 fix 才能在确认应成为独立知识后 `promote`。
 
 ## prd
 
 用法：
 
 ```powershell
-ak prd "学习完成率口径从课程维度改为课节维度"
+ak prd "学习完成率口径从课程维度改为课节维度" --target knowledge/domain/learning-progress.md
 ```
 
 作用：
 
-创建一条 PRD 纠偏记录模板，写入 `inbox/prd-corrections/`。
+创建一条 PRD 纠偏记录模板，写入 `inbox/prd-corrections/`。如果被纠正对象是未确认草稿，应直接修改原草稿，不创建本记录。
 
 什么时候用：
 
@@ -244,20 +260,22 @@ ak prd "学习完成率口径从课程维度改为课节维度"
 底层动作：
 
 ```text
-agent-knowledge record-fix --type prd --title <标题>
+agent-knowledge record-fix --type prd --title <标题> [--target <知识文件>]
 ```
+
+带 `--target` 时，先修改并审核目标，再用 `ak resolve <生成的inbox文件>` 关闭，绝不能 `promote`；不带 `target` 的独立 fix 才能在确认应成为独立知识后 `promote`。
 
 ## tech
 
 用法：
 
 ```powershell
-ak tech "图谱接口不能混用 ACL PT 集合和教研 PT 映射"
+ak tech "图谱接口不能混用 ACL PT 集合和教研 PT 映射" --target knowledge/rules/aggregation-data-source-consistency.md
 ```
 
 作用：
 
-创建一条技术方案纠偏记录模板，写入 `inbox/tech-solution-corrections/`。
+创建一条技术方案纠偏记录模板，写入 `inbox/tech-solution-corrections/`。如果被纠正对象是未确认草稿，应直接修改原草稿，不创建本记录。
 
 什么时候用：
 
@@ -269,10 +287,64 @@ ak tech "图谱接口不能混用 ACL PT 集合和教研 PT 映射"
 
 是。写入 `inbox/tech-solution-corrections/`。
 
+纠错生命周期边界：
+
+- `inbox/` 中尚未确认的 `draft` / `pending` 文件被纠正时，直接修改原文件。
+- 已确认正式知识被纠正时，创建带 `--target` 的 targeted fix；独立业务结论被纠正时，创建不带 `target` 的独立 fix。
+- targeted fix 创建后，先由人工或 Codex 修改并审核目标，再执行 `ak resolve`；不能执行 `ak promote`。
+- 独立 fix 只有在确认应成为独立长期知识后，才执行 `ak promote`。
+- 已知被纠正文件时可传 `--target <知识文件>`；如果目标是未确认草稿，命令会拒绝并提示直接修改。
+- 不得让同一结论同时以原草稿和 fix 两种待确认形态重复存在。
+
 底层动作：
 
 ```text
-agent-knowledge record-fix --type tech --title <标题>
+agent-knowledge record-fix --type tech --title <标题> [--target <知识文件>]
+```
+
+## resolve
+
+用法：
+
+```powershell
+ak resolve inbox/tech-solution-corrections/<纠偏文件>.md
+ak resolve inbox/tech-solution-corrections/<旧纠偏文件>.md --confirm-legacy
+```
+
+作用：
+
+关闭已经由目标正式知识吸收的 targeted fix。命令校验目标仍是 `confirmed` 且当前 SHA-256 与记录时的 `target_hash` 不同，然后把纠偏 source 转换成可恢复、可审计的归档工件。命令不会自动修改或语义合并目标正文。
+
+什么时候用：
+
+1. 已阅读 fix 的失败点、证据链和纠偏结论。
+2. 已由人工或获授权的 Codex 工作流修改 `target` 指向的正式知识。
+3. 已完整审核目标正文，确认纠偏被正确、完整地吸收。
+
+哈希变化只能证明目标文件字节发生过变化，不能证明语义正确；不能把 `resolve` 的哈希校验替代人工审核。
+
+是否写文件：
+
+是。成功后旧 inbox source 消失，并生成：
+
+- `archive/source-survivors/<分类>/<文件>`：source survivor，与处理中 source 使用同一 inode，承接旧文件句柄的晚到写入。
+- `archive/resolved-sources/<分类>/<文件>`：source snapshot，独立 inode 的只读字节快照，固定本次审计采用的原文。
+- `archive/resolved/<分类>/<文件>`：resolved 审计记录，保存 source hash、目标基线/关闭哈希和两份 source 工件路径。
+
+legacy 边界：
+
+旧版 targeted fix 缺少 `target_hash` 时默认拒绝。只有人工已经确认目标吸收纠偏后，才能显式传 `--confirm-legacy`；该参数不是绕过内容审核的快捷方式。
+
+失败与恢复：
+
+- 命令会保留 `work/` claim、survivor、snapshot 或 resolved 等恢复现场；使用同一个 source 路径重试。
+- 工件冲突、内容不一致或 source 路径复用时，保留全部版本并人工审核，不要手工删除、移动或晋升这些工件。
+- `archive/` 与 `work/` 不参与知识检索、必须阅读清单或待确认清单，也不是第二份正式知识。
+
+底层动作：
+
+```text
+agent-knowledge resolve-fix --file <inbox纠偏文件> [--confirm-legacy]
 ```
 
 ## rule
@@ -311,6 +383,166 @@ ak rule "禁止在循环中逐条远程查询" --confirmed
 ```text
 agent-knowledge add-rule <规则标题> [--confirmed]
 ```
+
+## promote
+
+用法：
+
+```powershell
+ak promote inbox/rules/2026-07-09-aggregation-rule.md
+```
+
+作用：
+
+将 `inbox/` 下已经人工确认的普通草稿或不带 `target` 的独立 fix 移动到 `knowledge/` 对应子目录，并把 frontmatter 的 `status` 改为 `confirmed`。
+
+映射规则：
+
+```text
+inbox/<子目录>/<文件名>.md -> knowledge/<子目录>/<文件名>.md
+```
+
+什么时候用：
+
+- `inbox/rules/` 中的规则草稿已经确认长期有效
+- 不带 `target` 的独立 fix 已整理完毕，并确认应成为独立长期知识
+- 定期清理待确认区，避免 inbox 长期堆积
+
+是否写文件：
+
+是。会写入 `knowledge/` 目标文件，并删除原 `inbox/` 文件。
+
+安全边界：
+
+- 只接受 `inbox/` 下的文件
+- 如果目标 `knowledge/` 文件已经存在，会直接报错，不会覆盖已有已确认知识
+- 带非空 `target` 的 targeted fix 会在任何写入前拒绝；必须先修改并审核目标，再执行 `ak resolve`
+
+底层动作：
+
+```text
+agent-knowledge promote --file <inbox文件>
+```
+
+## pending
+
+用法：
+
+```powershell
+ak pending
+```
+
+作用：
+
+列出 `inbox/` 下仍待确认的知识条目，输出相对路径、`status`、`type` 和 `updated`。
+
+什么时候用：
+
+- 检查是否有长期未处理的规则草稿或纠错记录
+- 准备晋升普通草稿/独立 fix，或关闭 targeted fix 前
+- 定期维护团队知识库时
+
+是否写文件：
+
+否。只读取 inbox，不修改文件。
+
+说明：
+
+只有带 `status` frontmatter 的 Markdown 才会被列为待确认条目，`inbox/README.md` 这类说明文档不会出现在清单里。
+
+底层动作：
+
+```text
+agent-knowledge list-pending
+```
+
+## adapters
+
+用法：
+
+```powershell
+ak adapters
+ak adapters --check
+```
+
+作用：
+
+同步 OpenCode 命令适配器，或用 `--check` 只读检查目标是否缺失、是否与模板漂移。
+
+模板边界：
+
+- 唯一模板来源是工具仓库的 `agent-knowledge/templates/opencode/`。
+- 安装目标是同一工具仓库的 `.opencode/command/`。
+- 私有知识库的 `--knowledge-root` 不会改变模板或安装目标。
+- `--check` 不写文件，发现漂移时退出 1；同步模式会更新目标文件。
+
+底层动作：
+
+```text
+agent-knowledge sync-adapters [--check] --repository-root <工具仓库根目录>
+```
+
+## doctor
+
+用法：
+
+```powershell
+ak doctor
+ak doctor --json
+```
+
+作用：
+
+只读扫描 `knowledge/` 与 `inbox/` 下的 Markdown，精确跳过 `inbox/README.md`。检查 UTF-8 BOM、frontmatter、目录对应的 `status`、全局重复标题、`target`、targeted fix 的 `target_hash` / `fix_id`、`project_root` / 逗号分隔的 `evidence_files`，以及 OpenCode 适配器漂移。还会只读诊断 `knowledge/`、`inbox/` 下的相邻 `*.md.lock` / `*.md.lock.reclaim`，以及固定 `work/locks/resolve/` 目录中名称为 64 位小写十六进制哈希的锁；其它 `.lock` 外观文件不读取。合法内容必须完整匹配 `PID:RFC4122-UUID`，末尾可以没有换行或只有一个 LF / CRLF。锁扫描不跟随 symlink / junction，也不会越出知识库真实根。只有工具仓库的 `.opencode/command/` 目录存在时才执行适配器检查，模板固定来自 `agent-knowledge/templates/opencode/`。`archive/` 与 `work/` 不进入知识正文扫描，`work/` 仅检查上述固定锁目录。
+
+严重级别与退出码：
+
+- `error`：BOM、frontmatter 缺失、状态非法、target 失效、`target_hash` 非法、`fix_id` 非法、适配器漂移。存在 error 时退出 1。
+- `warning`：重复标题、缺少 project_root、证据文件无效或不存在、targeted fix 缺少 `target_hash`、owner PID 已退出的 `orphan_lock`、token 无法解析的 `invalid_lock`。只有 warning 时退出 0；缺 `target_hash` 表示关闭旧记录时需要显式 `--confirm-legacy`。
+- 文本和 JSON 都会给出检查文件数及问题明细；`--json` 在退出 0 或 1 时 stdout 都只有一个合法 JSON 对象。
+- 不会自动修复、晋升、删除或重写文件。
+
+锁恢复边界：
+
+- 普通主锁只有在调用成功持有相邻 reclaim guard、内容严格匹配 `PID:RFC4122-UUID` 且 owner PID 已退出时才会自动恢复；PID-only、BOM、额外内容或非法 UUID 不会被删除。
+- orphan reclaim guard 不自动删除，以避免多个回收者之间的 ABA 误删；后续获取会安全超时并保留 guard。
+- `LOCK_TIMEOUT` 不代表可以直接删锁。应先停止或确认没有相关任务，再用 `doctor` 核对路径和 PID，检查锁内容及相邻恢复工件，最后由团队协调人工处理；无法确认 token 所属任务时不要强制解锁。
+
+参数边界：
+
+只允许不带参数，或带唯一的 `--json`。包装器会显式传入工具仓库根目录，并继续按既有规则解析知识库根目录。
+
+底层动作：
+
+```text
+agent-knowledge doctor [--json] --repository-root <工具仓库根目录>
+```
+
+## json
+
+用法：
+
+```powershell
+ak task "分析实体图谱 ownerId 为空" --json
+ak search "聚合接口 数据源一致" --json
+ak check poseidon --json
+ak doctor --json
+```
+
+作用：
+
+让查询类命令输出 JSON，便于 Codex、OpenCode 或其它自动化脚本直接解析。
+
+支持范围：
+
+- `ak task`
+- `ak search`
+- `ak check`
+- `ak doctor`
+
+是否写文件：
+
+否。只改变输出格式。
 
 ## raw
 

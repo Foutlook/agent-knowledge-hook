@@ -27,16 +27,19 @@ function Write-Usage {
     "  ak projects                            List registered projects",
     "  ak check <project>                     Check whether project knowledge is stale",
     "  ak refresh <project> [summary]         Refresh project knowledge metadata",
-    "  ak bug <title>                         Record a bug fix note",
-    "  ak prd <title>                         Record a PRD correction note",
-    "  ak tech <title>                        Record a technical correction note",
+    "  ak bug <title> [--target <file>]       Record a bug fix note",
+    "  ak prd <title> [--target <file>]       Record a PRD correction note",
+    "  ak tech <title> [--target <file>]      Record a technical correction note",
     "  ak rule <title> [--confirmed]          Add a draft or confirmed rule",
     "  ak promote <file>                      Promote an inbox draft into knowledge/",
+    "  ak resolve <file> [--confirm-legacy]   Resolve a targeted fix into audit archives",
     "  ak pending                             List pending inbox items",
+    "  ak adapters [--check]                  Sync or check OpenCode command adapters",
+    "  ak doctor [--json]                     Run read-only knowledge health checks",
     "  ak raw <agent-knowledge args>          Forward args to the base CLI",
     "",
     "Options:",
-    "  --json (task/search/check)             Output JSON for automation pipelines",
+    "  --json (task/search/check/doctor)      Output JSON for automation pipelines",
     "",
     "Examples:",
     "  ak task `"analyze empty ownerId in entity graph`"",
@@ -324,11 +327,37 @@ try {
       )
     }
     { $_ -in @("bug", "prd", "tech") } {
-      if (-not ($rest -join " ")) {
+      $target = ""
+      $titleParts = @()
+      for ($index = 0; $index -lt $rest.Count; $index++) {
+        if ($rest[$index] -eq "--target") {
+          if ($index + 1 -lt $rest.Count) {
+            $target = $rest[$index + 1]
+            $index++
+          } else {
+            throw "record-fix --target requires a knowledge file path"
+          }
+          continue
+        }
+        if ($rest[$index] -like "--target=*") {
+          $target = $rest[$index].Substring("--target=".Length)
+          if (-not $target) {
+            throw "record-fix --target requires a knowledge file path"
+          }
+          continue
+        }
+        $titleParts += $rest[$index]
+      }
+      $title = $titleParts -join " "
+      if (-not $title) {
         Write-AkHelp $command
         exit 1
       }
-      Invoke-AgentKnowledge -CliArgs @("record-fix", "--type", $command, "--title", ($rest -join " "))
+      $cliArgs = @("record-fix", "--type", $command, "--title", $title)
+      if ($target) {
+        $cliArgs += @("--target", $target)
+      }
+      Invoke-AgentKnowledge -CliArgs $cliArgs
     }
     "rule" {
       $confirmed = $rest -contains "--confirmed"
@@ -350,8 +379,49 @@ try {
       }
       Invoke-AgentKnowledge -CliArgs @("promote", "--file", $rest[0])
     }
+    "resolve" {
+      if ($rest.Count -lt 1 -or $rest.Count -gt 2) {
+        throw "ak resolve accepts exactly one file and an optional --confirm-legacy"
+      }
+      $source = $rest[0]
+      if ([string]::IsNullOrWhiteSpace($source) -or $source.StartsWith("--")) {
+        throw "ak resolve requires a non-empty inbox fix file before --confirm-legacy"
+      }
+      $confirmLegacy = $false
+      if ($rest.Count -eq 2) {
+        if ($rest[1] -ne "--confirm-legacy") {
+          throw "ak resolve accepts only one optional --confirm-legacy after the file"
+        }
+        $confirmLegacy = $true
+      }
+      $cliArgs = @("resolve-fix", "--file", $source)
+      if ($confirmLegacy) {
+        $cliArgs += "--confirm-legacy"
+      }
+      Invoke-AgentKnowledge -CliArgs $cliArgs
+    }
     "pending" {
       Invoke-AgentKnowledge -CliArgs @("list-pending")
+    }
+    "adapters" {
+      if ($rest.Count -gt 1 -or ($rest.Count -eq 1 -and $rest[0] -ne "--check")) {
+        throw "ak adapters accepts only an optional --check"
+      }
+      $cliArgs = @("sync-adapters", "--repository-root", $ToolRepoRoot)
+      if ($rest -contains "--check") {
+        $cliArgs += "--check"
+      }
+      Invoke-AgentKnowledge -CliArgs $cliArgs
+    }
+    "doctor" {
+      if ($rest.Count -gt 1 -or ($rest.Count -eq 1 -and $rest[0] -ne "--json")) {
+        throw "ak doctor accepts no arguments or a single --json"
+      }
+      $cliArgs = @("doctor", "--repository-root", $ToolRepoRoot)
+      if ($rest -contains "--json") {
+        $cliArgs += "--json"
+      }
+      Invoke-AgentKnowledge -CliArgs $cliArgs
     }
     "raw" {
       Invoke-AgentKnowledge -CliArgs $rest

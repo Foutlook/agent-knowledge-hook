@@ -173,18 +173,30 @@ node agent-knowledge/bin/agent-knowledge.js before-task "<任务描述>"
 
 如果输出中出现“必须阅读”，必须先按路径读完所有必须阅读项，再给出结论、方案或修改建议。`before-task` 的输出只是知识入口，仍需沿真实代码路径确认失败点、最终数据源和关键参数。
 
-发生人工纠正后，使用 `record-fix` 记录纠错材料：
+发生人工纠正后，先判断被纠正对象的生命周期：未确认的 `inbox/` 草稿直接修改，不额外创建 fix；已确认知识、业务分析结论、BUG 结论或已输出技术方案被纠正时，才使用 `record-fix`。不得让同一结论同时以原草稿和 fix 两种待确认形态重复存在。
+
+已知被纠正的知识文件时，通过 `--target` 明确关联：
 
 ```bash
-agent-knowledge record-fix --type <bug|prd|tech> --title "<纠错标题>"
+agent-knowledge record-fix --type <bug|prd|tech> --title "<纠错标题>" --target "<知识文件>"
 ```
 
 未安装全局命令时，从仓库根目录使用：
 
 ```bash
-node agent-knowledge/bin/agent-knowledge.js record-fix --type <bug|prd|tech> --title "<纠错标题>"
+node agent-knowledge/bin/agent-knowledge.js record-fix --type <bug|prd|tech> --title "<纠错标题>" --target "<知识文件>"
 ```
 
-`bug` 用于 BUG 分析纠错，`prd` 用于需求或 PRD 理解纠错，`tech` 用于技术方案纠错。
+`bug` 用于 BUG 分析纠错，`prd` 用于需求或 PRD 理解纠错，`tech` 用于技术方案纠错。如果 `--target` 指向 `inbox/` 中的 `draft` 或 `pending` 文件，命令会拒绝创建 fix，并提示直接修改原草稿。
+
+带 `--target` 的 targeted fix 必须回到原正式知识闭环：先由人工或 Codex 基于证据修改并完整审核目标，再执行：
+
+```bash
+agent-knowledge resolve-fix --file <inbox纠偏文件> [--confirm-legacy]
+```
+
+targeted fix 绝不能 `promote`；只有不带 `target` 的独立 fix，才能在确认应成为独立长期知识后沿用 `promote`。`resolve-fix` 校验目标哈希相对基线已变化，但哈希变化不等于语义正确，人工审核仍是关闭前提。`--confirm-legacy` 只用于缺少 `target_hash` 且已经人工确认目标吸收纠偏的旧记录。
+
+关闭成功后会保留 source survivor（承接同 inode 的晚到写入）、独立只读 source snapshot 和 resolved 审计记录。`archive/` 与 `work/` 不参与知识检索、必须阅读或待确认清单。命令失败时保留恢复工件并用同一 source 路径重试；出现内容冲突或路径复用时必须人工审核，不得手工删除、移动或晋升恢复现场。
 
 `knowledge/` 存放已经确认的团队知识，可作为稳定约束并结合当前代码证据验证；`inbox/` 存放待确认材料，只能作为线索和复盘入口，不能当成强规则直接套用。
