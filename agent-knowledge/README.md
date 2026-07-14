@@ -475,7 +475,7 @@ node agent-knowledge\bin\agent-knowledge.js search "RPC 本地依赖"
 
 真实私有知识库只适合在具备访问权限的本地环境中额外执行只读 `doctor`，该结果属于非阻塞的环境检查，不作为跨环境 CI 门禁。
 
-2026-07-13 在 Windows PowerShell 环境完成以下验证。以下命令均从仓库根目录执行，例如：
+2026-07-14 在 Windows PowerShell 环境完成以下验证。以下命令均从仓库根目录执行，例如：
 
 ```powershell
 cd <workspace-root>\agent-knowledge-hook
@@ -487,7 +487,7 @@ npm.cmd run test
 Pop-Location
 ```
 
-结果：`tests/*.test.js` 全部通过。测试覆盖安全新建与原子更新、OpenCode 适配器同步/漂移检查、`doctor` 结构与引用检查、CLI/PowerShell 参数边界、targeted fix 关闭与中断恢复、JSON 机读输出，以及原有检索、纠错、刷新、晋升和待确认清单流程；验证过程不会污染真实 `agent-knowledge/inbox`。
+结果：共 145 项测试，144 项通过、0 项失败、1 项跳过。跳过项是 `resolveFix source rejects a symlink` 文件 symlink 拒绝用例，因为 Windows 当前权限不允许创建该测试所需的文件 symlink；其余 144 项均已执行并通过。测试覆盖安全新建与原子更新、OpenCode 适配器同步/漂移检查、`doctor` 结构与引用检查、CLI/PowerShell 参数边界、targeted fix 关闭与中断恢复、JSON 机读输出，以及原有检索、纠错、刷新、晋升和待确认清单流程；验证过程不会污染真实 `agent-knowledge/inbox`。
 
 PowerShell 直接执行 `.ps1` 可能被执行策略拦截，因此本地验证使用 `-ExecutionPolicy Bypass` 显式运行包装器：
 
