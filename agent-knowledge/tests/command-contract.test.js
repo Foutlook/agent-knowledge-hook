@@ -332,57 +332,7 @@ test('sync-command-docs 拒绝重复 --repository-root', async (t) => {
 
 function findMatchingDelimiter(source, openingIndex, opening, closing) {
   let depth = 0;
-  let state = 'code';
-
-  for (let index = openingIndex; index < source.length; index += 1) {
-    const character = source[index];
-    const next = source[index + 1];
-
-    if (state === 'line-comment') {
-      if (character === '\n') state = 'code';
-      continue;
-    }
-    if (state === 'block-comment') {
-      if (character === '*' && next === '/') {
-        state = 'code';
-        index += 1;
-      }
-      continue;
-    }
-    if (state === 'single-quote' || state === 'double-quote' || state === 'template') {
-      if (character === '\\') {
-        index += 1;
-        continue;
-      }
-      if ((state === 'single-quote' && character === "'")
-          || (state === 'double-quote' && character === '"')
-          || (state === 'template' && character === '`')) {
-        state = 'code';
-      }
-      continue;
-    }
-    if (character === '/' && next === '/') {
-      state = 'line-comment';
-      index += 1;
-      continue;
-    }
-    if (character === '/' && next === '*') {
-      state = 'block-comment';
-      index += 1;
-      continue;
-    }
-    if (character === "'") {
-      state = 'single-quote';
-      continue;
-    }
-    if (character === '"') {
-      state = 'double-quote';
-      continue;
-    }
-    if (character === '`') {
-      state = 'template';
-      continue;
-    }
+  for (const { index, character } of iterateJavaScriptCode(source, openingIndex)) {
     if (character === opening) depth += 1;
     if (character === closing) {
       depth -= 1;
@@ -391,6 +341,80 @@ function findMatchingDelimiter(source, openingIndex, opening, closing) {
   }
 
   throw new Error(`未找到匹配的 ${closing}`);
+}
+
+function* iterateJavaScriptCode(source, start = 0) {
+  const states = [{ type: 'code' }];
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    const state = states.at(-1);
+
+    if (state.type === 'line-comment') {
+      if (character === '\n') states.pop();
+      continue;
+    }
+    if (state.type === 'block-comment') {
+      if (character === '*' && next === '/') {
+        states.pop();
+        index += 1;
+      }
+      continue;
+    }
+    if (state.type === 'single-quote' || state.type === 'double-quote') {
+      if (character === '\\') {
+        index += 1;
+      } else if ((state.type === 'single-quote' && character === "'")
+          || (state.type === 'double-quote' && character === '"')) {
+        states.pop();
+      }
+      continue;
+    }
+    if (state.type === 'template') {
+      if (character === '\\') {
+        index += 1;
+      } else if (character === '`') {
+        states.pop();
+      } else if (character === '$' && next === '{') {
+        states.push({ type: 'template-expression', braceDepth: 1 });
+        index += 1;
+        yield { index, character: '{' };
+      }
+      continue;
+    }
+
+    if (state.type === 'template-expression') {
+      if (character === '{') {
+        state.braceDepth += 1;
+      } else if (character === '}') {
+        state.braceDepth -= 1;
+        yield { index, character };
+        if (state.braceDepth === 0) states.pop();
+        continue;
+      }
+    }
+
+    if (character === '/' && next === '/') {
+      states.push({ type: 'line-comment' });
+      index += 1;
+    } else if (character === '/' && next === '*') {
+      states.push({ type: 'block-comment' });
+      index += 1;
+    } else if (character === "'") {
+      states.push({ type: 'single-quote' });
+    } else if (character === '"') {
+      states.push({ type: 'double-quote' });
+    } else if (character === '`') {
+      states.push({ type: 'template' });
+    } else {
+      yield { index, character };
+    }
+  }
+
+  const unclosedState = states.find((state) => !['code', 'line-comment'].includes(state.type));
+  if (unclosedState) {
+    throw new Error(`JavaScript 词法结构未闭合：${unclosedState.type}`);
+  }
 }
 
 function extractTopLevelCommandRoutes(source) {
@@ -410,7 +434,11 @@ function extractTopLevelCommandRoutes(source) {
       const statementEnd = findTopLevelStatementEnd(body, index);
       const statement = body.slice(index, statementEnd);
       const commandDeclaration = /^const\s*\[\s*command(?:\s*,\s*\.\.\.[A-Za-z_$][\w$]*)?\s*\]\s*=\s*argv\s*;$/u;
-      if (containsCodeIdentifier(statement, 'command') && !commandDeclaration.test(statement.trim())) {
+      // 最终兜底仅把未知命令写入错误信息，不参与分发，因此与声明一起作为唯一非路由例外。
+      const unknownCommandDiagnostic = /^console\.error\(`未知命令：\$\{command\}\\n\\n\$\{usage\(contract\)\}`\);$/u;
+      if (containsCodeIdentifier(statement, 'command')
+          && !commandDeclaration.test(statement.trim())
+          && !unknownCommandDiagnostic.test(statement.trim())) {
         throw new Error(`未知路由结构：${statement.trim()}，请同步更新契约测试`);
       }
       index = statementEnd;
@@ -481,45 +509,8 @@ function findTopLevelStatementEnd(source, start) {
   let parentheses = 0;
   let brackets = 0;
   let braces = 0;
-  let state = 'code';
-
-  for (let index = start; index < source.length; index += 1) {
-    const character = source[index];
-    const next = source[index + 1];
-    if (state === 'line-comment') {
-      if (character === '\n') state = 'code';
-      continue;
-    }
-    if (state === 'block-comment') {
-      if (character === '*' && next === '/') {
-        state = 'code';
-        index += 1;
-      }
-      continue;
-    }
-    if (state !== 'code') {
-      if (character === '\\') {
-        index += 1;
-      } else if ((state === 'single-quote' && character === "'")
-          || (state === 'double-quote' && character === '"')
-          || (state === 'template' && character === '`')) {
-        state = 'code';
-      }
-      continue;
-    }
-    if (character === '/' && next === '/') {
-      state = 'line-comment';
-      index += 1;
-    } else if (character === '/' && next === '*') {
-      state = 'block-comment';
-      index += 1;
-    } else if (character === "'") {
-      state = 'single-quote';
-    } else if (character === '"') {
-      state = 'double-quote';
-    } else if (character === '`') {
-      state = 'template';
-    } else if (character === '(') {
+  for (const { index, character } of iterateJavaScriptCode(source, start)) {
+    if (character === '(') {
       parentheses += 1;
     } else if (character === ')') {
       parentheses -= 1;
@@ -539,48 +530,17 @@ function findTopLevelStatementEnd(source, start) {
 }
 
 function containsCodeIdentifier(source, identifier) {
-  let state = 'code';
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index];
-    const next = source[index + 1];
-    if (state === 'line-comment') {
-      if (character === '\n') state = 'code';
-      continue;
-    }
-    if (state === 'block-comment') {
-      if (character === '*' && next === '/') {
-        state = 'code';
-        index += 1;
-      }
-      continue;
-    }
-    if (state !== 'code') {
-      if (character === '\\') {
-        index += 1;
-      } else if ((state === 'single-quote' && character === "'")
-          || (state === 'double-quote' && character === '"')
-          || (state === 'template' && character === '`')) {
-        state = 'code';
-      }
-      continue;
-    }
-    if (character === '/' && next === '/') {
-      state = 'line-comment';
-      index += 1;
-    } else if (character === '/' && next === '*') {
-      state = 'block-comment';
-      index += 1;
-    } else if (character === "'") {
-      state = 'single-quote';
-    } else if (character === '"') {
-      state = 'double-quote';
-    } else if (character === '`') {
-      state = 'template';
-    } else if (/[A-Za-z_$]/u.test(character)) {
+  let previousCodeIndex = -2;
+  let previousCodeCharacter = '';
+  for (const { index, character } of iterateJavaScriptCode(source)) {
+    const startsIdentifier = /[A-Za-z_$]/u.test(character)
+      && (previousCodeIndex !== index - 1 || !/[\w$]/u.test(previousCodeCharacter));
+    if (startsIdentifier) {
       const identifierMatch = source.slice(index).match(/^[A-Za-z_$][\w$]*/u)[0];
       if (identifierMatch === identifier) return true;
-      index += identifierMatch.length - 1;
     }
+    previousCodeIndex = index;
+    previousCodeCharacter = character;
   }
   return false;
 }
@@ -660,6 +620,34 @@ test('路由提取器拒绝顶层 Map 查找 command 的分发调用', () => {
   }`;
 
   assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+});
+
+test('路由提取器拒绝 if 条件模板插值中的 command 引用', () => {
+  const source = "async function main(argv) {\n"
+    + "  const [command] = argv;\n"
+    + "  if (`${command}` === 'extra') { return 0; }\n"
+    + '}';
+
+  assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+});
+
+test('路由提取器拒绝嵌套模板插值中的 command 引用', () => {
+  const source = "async function main(argv) {\n"
+    + "  const [command] = argv;\n"
+    + '  const selected = `${`${command}`}`;\n'
+    + '}';
+
+  assert.throws(() => extractTopLevelCommandRoutes(source), /未知路由结构.*同步更新契约测试/u);
+});
+
+test('路由提取器忽略纯模板文本并完整消费复杂插值语句', () => {
+  const source = "async function main(argv) {\n"
+    + "  const [command] = argv;\n"
+    + "  const label = `${(() => { const text = 'command'; /* command */ return `${text};command`; })()}`;\n"
+    + "  if (command === 'known') { return 0; }\n"
+    + '}';
+
+  assert.deepEqual(extractTopLevelCommandRoutes(source), ['known']);
 });
 
 test('真实命令契约按登记顺序加载', async () => {
