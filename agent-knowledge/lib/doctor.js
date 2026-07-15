@@ -16,12 +16,12 @@ import {
   toPosixPath,
 } from './knowledge-files.js';
 import {
+  isRfc4122Uuid,
   isProcessAlive,
   parseLockContent,
-  RFC4122_UUID_PATTERN,
 } from './locks.js';
 import { syncAdapters } from './repository-maintenance.js';
-import { TARGETED_FIX_CATEGORIES } from './targeted-fix-contract.js';
+import { isTargetedFixCategory } from './targeted-fix-contract.js';
 
 const ADJACENT_LOCK_FILE_PATTERN = /\.md\.lock(?:\.reclaim)?$/;
 const RESOLVE_LOCK_FILE_PATTERN = /^[0-9a-f]{64}\.lock(?:\.reclaim)?$/;
@@ -162,7 +162,7 @@ function validateDoctorFixMetadata(frontmatter, relativePath, issues) {
   // 空白 target 与独立 fix 等价；只有固定纠偏分类中的 pending targeted fix 才受闭环元数据约束。
   if (parts.length !== 3
       || parts[0] !== 'inbox'
-      || !TARGETED_FIX_CATEGORIES.has(parts[1])
+      || !isTargetedFixCategory(parts[1])
       || readFrontmatterField(frontmatter, 'status') !== 'pending'
       || !target) {
     return;
@@ -188,7 +188,7 @@ function validateDoctorFixMetadata(frontmatter, relativePath, issues) {
   }
 
   if (hasFrontmatterField(frontmatter, 'fix_id')
-      && !RFC4122_UUID_PATTERN.test(readFrontmatterField(frontmatter, 'fix_id'))) {
+      && !isRfc4122Uuid(readFrontmatterField(frontmatter, 'fix_id'))) {
     addDoctorIssue(
       issues,
       'error',

@@ -121,6 +121,15 @@ export function extractQueryKeywords(query = '') {
   return buildQueryModel(query).expandedTerms;
 }
 
+export function getQueryMetadata(query = '') {
+  const { queryTerms, expandedTerms } = buildQueryModel(query);
+  return {
+    keywords: expandedTerms,
+    queryTerms,
+    expandedTerms,
+  };
+}
+
 // 对长度 >= 3 的中文整词补充相邻 2-gram，使「队列为空」这类短语也能拆出「队列」命中同义词/知识标题。
 // 仅作用于查询侧；extractKeywords 保持纯净以便单测断言顺序。
 function segmentChineseBigrams(keywords) {

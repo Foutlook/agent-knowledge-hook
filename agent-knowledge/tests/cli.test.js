@@ -5,6 +5,8 @@ import path from 'node:path';
 import test from 'node:test';
 
 import * as agentKnowledgeModule from '../bin/agent-knowledge.js';
+import { isRfc4122Uuid } from '../lib/locks.js';
+import * as targetedFixContract from '../lib/targeted-fix-contract.js';
 import {
   createGitProject,
   createTempRoot,
@@ -193,6 +195,29 @@ test('public entry exports remain stable for programmatic consumers', () => {
     'writeFileAtomic',
     'writeUniqueFile',
   ].sort());
+
+  assert.deepEqual(Object.keys(targetedFixContract).sort(), [
+    'getTargetedFixCategory',
+    'isTargetedFixCategory',
+  ]);
+  for (const [type, category] of [
+    ['bug', 'fixes'],
+    ['prd', 'prd-corrections'],
+    ['tech', 'tech-solution-corrections'],
+  ]) {
+    assert.equal(targetedFixContract.getTargetedFixCategory(type), category);
+    assert.equal(targetedFixContract.isTargetedFixCategory(category), true);
+  }
+  assert.equal(targetedFixContract.getTargetedFixCategory('unknown'), undefined);
+  assert.equal(targetedFixContract.isTargetedFixCategory('unknown'), false);
+
+  const validUuid = '123E4567-E89B-12D3-A456-426614174000';
+  assert.equal(isRfc4122Uuid(validUuid), true);
+  assert.equal(isRfc4122Uuid({ toString: () => validUuid }), true);
+  assert.equal(isRfc4122Uuid(''), false);
+  assert.equal(isRfc4122Uuid(null), false);
+  assert.equal(isRfc4122Uuid(undefined), false);
+  assert.equal(isRfc4122Uuid(123), false);
 });
 
 test('bin entry import has no CLI side effects', async () => {

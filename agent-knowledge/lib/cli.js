@@ -13,8 +13,8 @@ import {
   refreshProject,
 } from './lifecycle.js';
 import {
-  extractKeywords,
   extractQueryKeywords,
+  getQueryMetadata,
   searchKnowledge,
 } from './retrieval.js';
 import {
@@ -190,12 +190,11 @@ function formatDoctorOutput(result) {
 
 // 机读输出：将检索结果整理为结构化对象，便于 OpenCode/Codex 自动化管线消费。
 function resultToJson(command, query, results) {
-  const queryTerms = extractKeywords(query);
-  const expandedTerms = extractQueryKeywords(query);
+  const { keywords, queryTerms, expandedTerms } = getQueryMetadata(query);
   return {
     command,
     query,
-    keywords: expandedTerms,
+    keywords,
     queryTerms,
     expandedTerms,
     results: results.map((result) => ({

@@ -17,9 +17,9 @@ import {
   acquireAdjacentFileLock,
   FILE_LOCK_RETRY_DELAY_MS,
   FILE_LOCK_TIMEOUT_MS,
-  RFC4122_UUID_PATTERN,
+  isRfc4122Uuid,
 } from './locks.js';
-import { TARGETED_FIX_CATEGORIES } from './targeted-fix-contract.js';
+import { isTargetedFixCategory } from './targeted-fix-contract.js';
 
 export async function resolveFix({
   rootDir,
@@ -479,7 +479,7 @@ function validatePersistedSnapshotFrontmatter(snapshotBytes, relativeSource) {
   if (status !== 'pending' || !target) {
     throw new Error(`resolveFix snapshot 缺少 pending 状态或 target: ${relativeSource}`);
   }
-  if (fixId && !RFC4122_UUID_PATTERN.test(fixId)) {
+  if (fixId && !isRfc4122Uuid(fixId)) {
     throw new Error(`resolveFix snapshot 的 fix_id 非法: ${relativeSource}`);
   }
   if (targetHash && !/^[0-9a-f]{64}$/.test(targetHash)) {
@@ -563,7 +563,7 @@ function normalizeResolveSourceLocation(baseDir, file) {
   const parts = relativeSource.split('/');
   if (parts.length !== 3
       || parts[0] !== 'inbox'
-      || !TARGETED_FIX_CATEGORIES.has(parts[1])
+      || !isTargetedFixCategory(parts[1])
       || !isMarkdownPathForPlatform(parts[2])) {
     throw new Error(`resolveFix source 只允许固定分类下的直接 Markdown 文件: ${relativeSource}`);
   }
@@ -619,7 +619,7 @@ function validateNewResolveFixFrontmatter(rawBytes, relativeSource, { confirmLeg
   }
   const fixId = readFrontmatterField(parsed.frontmatter, 'fix_id');
   const targetHash = readFrontmatterField(parsed.frontmatter, 'target_hash');
-  if (fixId && !RFC4122_UUID_PATTERN.test(fixId)) {
+  if (fixId && !isRfc4122Uuid(fixId)) {
     throw new Error(`resolveFix source 的 fix_id 必须是合法 RFC4122 UUID: ${relativeSource}`);
   }
   if (targetHash && !/^[0-9a-f]{64}$/i.test(targetHash)) {

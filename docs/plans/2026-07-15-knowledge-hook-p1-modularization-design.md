@@ -75,6 +75,7 @@ bin 入口
 | `lib/locks.js` | 相邻文件锁、锁内容解析与 owner 判断；不改变锁范围或超时 |
 | `lib/retrieval.js` | 查询词组、同义词、评分、mustRead 分类、摘要、检索时过期提示 |
 | `lib/lifecycle.js` | add-rule、record-fix、check-stale、refresh-project、promote、list-pending |
+| `lib/targeted-fix-contract.js` | 私有持有 fix 类型到目录分类的映射，并提供只读分类查询能力 |
 | `lib/resolve-fix.js` | targeted fix 校验、claim、恢复、发布和审计工件 |
 | `lib/doctor.js` | 知识、引用、证据、锁和适配器健康检查 |
 | `lib/repository-maintenance.js` | 命令文档与适配器同步/漂移检查 |
@@ -85,12 +86,14 @@ bin 入口
 ```text
 bin -> cli -> 功能模块 -> knowledge-files / locks
                            -> command-contract（仅仓库维护和 CLI 帮助）
+doctor -> repository-maintenance（受控、只读、单向的适配器漂移检查）
 ```
 
 约束：
 
 - 功能模块不得反向依赖 `cli` 或 `bin`。
-- 功能模块之间不互相调用；共享基础能力只进入 `knowledge-files` 或 `locks`。
+- 功能模块之间默认不互相调用；唯一例外是 `doctor` 只读、单向调用 `repository-maintenance` 检查适配器漂移，后者不得反向依赖 `doctor`。
+- targeted fix 类型与目录分类只由 `targeted-fix-contract` 持有，lifecycle、doctor 和 resolve-fix 仅使用其只读查询能力。
 - `resolve-fix` 的恢复状态机保持集中，不拆成大量跨文件私有步骤。
 - 不为了减少行数创建通用框架、基类、插件机制或抽象工厂。
 

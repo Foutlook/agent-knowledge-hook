@@ -4,7 +4,7 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const RFC4122_UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
-export const RFC4122_UUID_PATTERN = new RegExp(`^${RFC4122_UUID_SOURCE}$`, 'i');
+const RFC4122_UUID_PATTERN = new RegExp(`^${RFC4122_UUID_SOURCE}$`, 'i');
 const LOCK_CONTENT_PATTERN = new RegExp(
   `^([1-9]\\d*):(${RFC4122_UUID_SOURCE})(?:\\r\\n|\\n)?(?![\\s\\S])`,
   'i',
@@ -12,6 +12,10 @@ const LOCK_CONTENT_PATTERN = new RegExp(
 
 export const FILE_LOCK_TIMEOUT_MS = 5000;
 export const FILE_LOCK_RETRY_DELAY_MS = 25;
+
+export function isRfc4122Uuid(value) {
+  return RFC4122_UUID_PATTERN.test(value);
+}
 
 export async function acquireAdjacentFileLock(filePath, { timeoutMs, retryDelayMs }) {
   const lockPath = `${filePath}.lock`;

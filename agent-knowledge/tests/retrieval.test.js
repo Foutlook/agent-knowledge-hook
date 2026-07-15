@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { extractKeywords, extractQueryKeywords, searchKnowledge } from '../bin/agent-knowledge.js';
+import { getQueryMetadata } from '../lib/retrieval.js';
 import {
   createGitProject,
   createTempRoot,
@@ -254,10 +255,14 @@ test('CLI search supports AGENT_KNOWLEDGE_ROOT for separated private knowledge r
 
 test('extractQueryKeywords expands synonyms to improve recall', () => {
   const keywords = extractQueryKeywords('队列 为空');
+  const metadata = getQueryMetadata('队列 为空');
 
   assert.ok(keywords.includes('队列'));
   assert.ok(keywords.includes('排队'));
   assert.ok(keywords.includes('queue'));
+  assert.deepEqual(metadata.keywords, keywords);
+  assert.deepEqual(metadata.expandedTerms, keywords);
+  assert.deepEqual(metadata.queryTerms, extractKeywords('队列 为空'));
 });
 
 test('extractQueryKeywords segments Chinese phrases into bigrams and expands synonyms', () => {

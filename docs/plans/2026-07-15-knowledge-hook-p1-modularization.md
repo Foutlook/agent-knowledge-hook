@@ -4,7 +4,7 @@
 
 **Goal:** 在不改变任何可观察行为的前提下，把知识库钩子的 3695 行单体 CLI 和 5429 行单体测试拆成单向依赖的功能模块。
 
-**Architecture:** 保留 `bin/agent-knowledge.js` 作为兼容入口，通过 re-export 维持程序化 API；生产逻辑按基础设施、功能域、CLI 三层逐个迁移。生产模块全部稳定后再拆测试，避免同时改变实现和保护网。
+**Architecture:** 保留 `bin/agent-knowledge.js` 作为兼容入口，通过 re-export 维持程序化 API；生产逻辑按基础设施、功能域、CLI 三层逐个迁移，targeted fix 类型到目录分类由 `lib/targeted-fix-contract.js` 单一持有。生产模块全部稳定后再拆测试，避免同时改变实现和保护网。
 
 **Tech Stack:** Node.js ESM、Node 内置 test runner、PowerShell 5.1、Git；零第三方运行时依赖。
 
@@ -299,6 +299,7 @@ git commit -m "拆分仓库维护模块"
 **Files:**
 
 - Create: `agent-knowledge/lib/lifecycle.js`
+- Create: `agent-knowledge/lib/targeted-fix-contract.js`
 - Modify: `agent-knowledge/bin/agent-knowledge.js`
 - Test: `agent-knowledge/tests/agent-knowledge.test.js`
 
@@ -306,7 +307,7 @@ git commit -m "拆分仓库维护模块"
 
 移动：
 
-- `FIX_TYPE_DIRS`。
+- `recordFix` 通过 `targeted-fix-contract` 查询类型对应目录，不在 lifecycle 复制分类映射。
 - `addRule`、`recordFix`、`validateFixTarget`。
 - `checkStale`、`computeDeepStale`。
 - `refreshProject`。
@@ -340,7 +341,7 @@ Expected: PASS；文件内容、锁、错误文本和副作用不变。
 
 ```powershell
 npm.cmd test
-git add agent-knowledge/lib/lifecycle.js agent-knowledge/bin/agent-knowledge.js
+git add agent-knowledge/lib/lifecycle.js agent-knowledge/lib/targeted-fix-contract.js agent-knowledge/bin/agent-knowledge.js
 git commit -m "拆分知识生命周期模块"
 ```
 
@@ -356,7 +357,7 @@ git commit -m "拆分知识生命周期模块"
 
 **Step 1：整体移动 resolve 闭环**
 
-移动 `RESOLVABLE_FIX_CATEGORIES`、resolve lock/artifact regex，以及 `resolveFix` 到 `buildResolvedFixContent` 之间所有仅属于 targeted fix 的状态校验、claim、恢复、发布、chmod、unlink 和工件 helper。
+移动 resolve lock/artifact regex，以及 `resolveFix` 到 `buildResolvedFixContent` 之间所有仅属于 targeted fix 的状态校验、claim、恢复、发布、chmod、unlink 和工件 helper。source 分类通过 `targeted-fix-contract` 的只读查询能力校验，不复制分类集合。
 
 只公开：
 

@@ -30,12 +30,7 @@ import {
   FILE_LOCK_RETRY_DELAY_MS,
   FILE_LOCK_TIMEOUT_MS,
 } from './locks.js';
-
-const FIX_TYPE_DIRS = {
-  bug: ['inbox', 'fixes'],
-  prd: ['inbox', 'prd-corrections'],
-  tech: ['inbox', 'tech-solution-corrections'],
-};
+import { getTargetedFixCategory } from './targeted-fix-contract.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -66,7 +61,8 @@ export async function addRule({ rootDir, knowledgeRoot, title, confirmed = false
 }
 
 export async function recordFix({ rootDir, knowledgeRoot, type, title, target } = {}) {
-  if (!FIX_TYPE_DIRS[type]) {
+  const category = getTargetedFixCategory(type);
+  if (!category) {
     throw new Error('recordFix requires --type <bug|prd|tech>');
   }
 
@@ -74,7 +70,7 @@ export async function recordFix({ rootDir, knowledgeRoot, type, title, target } 
   const targetInfo = target
     ? await validateFixTarget(knowledgeContext.baseDir, target)
     : null;
-  const targetDir = path.join(knowledgeContext.baseDir, ...FIX_TYPE_DIRS[type]);
+  const targetDir = path.join(knowledgeContext.baseDir, 'inbox', category);
   const stamp = timestamp();
   const fixId = randomUUID();
   const identityPrefix = fixId.replaceAll('-', '').slice(0, 12);
