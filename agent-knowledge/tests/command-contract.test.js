@@ -58,6 +58,7 @@ const commandContractTestPath = fileURLToPath(import.meta.url);
 const cliRuntimeModuleNames = [
   'command-contract.js',
   'knowledge-files.js',
+  'lifecycle.js',
   'locks.js',
   'repository-maintenance.js',
   'retrieval.js',
