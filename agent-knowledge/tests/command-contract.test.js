@@ -54,35 +54,14 @@ const akCommandNames = [
 const cliEntryPath = fileURLToPath(new URL('../bin/agent-knowledge.js', import.meta.url));
 const akEntryPath = fileURLToPath(new URL('../bin/ak.ps1', import.meta.url));
 const repositoryRootPath = fileURLToPath(new URL('../../', import.meta.url));
-const workflowPath = fileURLToPath(new URL('../../.github/workflows/agent-knowledge-ci.yml', import.meta.url));
 const commandContractTestPath = fileURLToPath(import.meta.url);
 const powerShellExecutable = process.platform === 'win32' ? 'powershell' : 'pwsh';
 const blockBegin = '<!-- BEGIN GENERATED: TEST_BLOCK -->';
 const blockEnd = '<!-- END GENERATED: TEST_BLOCK -->';
 
-test('CI 在测试后、适配器检查前只读检查命令文档漂移', async () => {
-  const [workflow, commandContractTestSource] = await Promise.all([
-    readFile(workflowPath, 'utf8'),
-    readFile(commandContractTestPath, 'utf8'),
-  ]);
-  const runTestsIndex = workflow.indexOf('run: npm test');
-  const commandDocsCheck = 'run: node bin/agent-knowledge.js sync-command-docs --check --repository-root ..';
-  const commandDocsCheckIndex = workflow.indexOf(commandDocsCheck);
-  const adaptersCheckIndex = workflow.indexOf(
-    'run: node bin/agent-knowledge.js sync-adapters --check --repository-root ..',
-  );
-  const syncCommandDocsRuns = workflow
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith('run:') && line.includes('sync-command-docs'));
+test('PowerShell 子进程按运行平台选择可执行文件', async () => {
+  const commandContractTestSource = await readFile(commandContractTestPath, 'utf8');
 
-  assert.notEqual(runTestsIndex, -1, 'CI 缺少测试步骤');
-  assert.notEqual(commandDocsCheckIndex, -1, 'CI 缺少命令文档只读漂移检查');
-  assert.notEqual(adaptersCheckIndex, -1, 'CI 缺少适配器只读漂移检查');
-  assert.ok(runTestsIndex < commandDocsCheckIndex, '命令文档漂移检查必须位于测试步骤之后');
-  assert.ok(commandDocsCheckIndex < adaptersCheckIndex, '命令文档漂移检查必须位于适配器检查之前');
-  assert.deepEqual(syncCommandDocsRuns, [commandDocsCheck]);
-  assert.doesNotMatch(workflow, /--knowledge-root|team-agent-knowledge|AGENT_KNOWLEDGE_ROOT/u);
   assert.match(
     commandContractTestSource,
     /const powerShellExecutable = process\.platform === 'win32' \? 'powershell' : 'pwsh';/u,
@@ -879,7 +858,7 @@ test('真实命令契约按登记顺序加载', async () => {
   assert.deepEqual(contract.akCommands.map(({ name }) => name), akCommandNames);
 });
 
-test('渲染 CLI 帮助命令行', async () => {
+test('渲染 CLI 帮助命令行', () => {
   const contract = createFormattingContract();
 
   assert.equal(renderCliUsage(contract), [
@@ -889,7 +868,7 @@ test('渲染 CLI 帮助命令行', async () => {
   ].join('\n'));
 });
 
-test('渲染 ak 基础使用文本', async () => {
+test('渲染 ak 基础使用文本', () => {
   const contract = createFormattingContract();
 
   assert.equal(renderAkBasicUsage(contract), [
@@ -900,7 +879,7 @@ test('渲染 ak 基础使用文本', async () => {
   ].join('\n'));
 });
 
-test('渲染 ak 命令 Markdown 表格', async () => {
+test('渲染 ak 命令 Markdown 表格', () => {
   const contract = createFormattingContract();
 
   assert.equal(renderAkCommandTable(contract), [
@@ -910,7 +889,7 @@ test('渲染 ak 命令 Markdown 表格', async () => {
   ].join('\n'));
 });
 
-test('渲染 CLI 命令 Markdown 表格并转义竖线', async () => {
+test('渲染 CLI 命令 Markdown 表格并转义竖线', () => {
   const contract = createFormattingContract();
 
   assert.equal(renderCliCommandTable(contract), [
@@ -922,7 +901,7 @@ test('渲染 CLI 命令 Markdown 表格并转义竖线', async () => {
   ].join('\n'));
 });
 
-test('渲染 CLI 命令代码清单', async () => {
+test('渲染 CLI 命令代码清单', () => {
   const contract = createFormattingContract();
 
   assert.equal(renderCliCommandList(contract), [

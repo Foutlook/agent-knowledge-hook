@@ -396,7 +396,12 @@ export async function syncCommandDocs({ repositoryRoot, contract, check = false 
       }
       content = replacement.content;
     }
-    preflightTargets.push({ ...target, targetPath, content, changedBlocks });
+    preflightTargets.push({
+      relativePath: target.relativePath,
+      targetPath,
+      content,
+      changedBlocks,
+    });
   }
 
   const drift = preflightTargets.flatMap((target) => (

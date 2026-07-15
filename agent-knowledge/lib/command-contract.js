@@ -147,7 +147,7 @@ function detectNewlineStyle(source) {
   const withoutCrLf = source.replaceAll('\r\n', '');
   const hasLf = withoutCrLf.includes('\n');
   const hasCr = withoutCrLf.includes('\r');
-  if ((hasCrLf && (hasLf || hasCr)) || hasCr || (!hasCrLf && hasCr)) {
+  if (hasCr || (hasCrLf && hasLf)) {
     throw new Error('生成区块源文件包含混合换行');
   }
   return hasCrLf ? '\r\n' : '\n';
