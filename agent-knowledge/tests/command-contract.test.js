@@ -61,6 +61,7 @@ const cliRuntimeModuleNames = [
   'lifecycle.js',
   'locks.js',
   'repository-maintenance.js',
+  'resolve-fix.js',
   'retrieval.js',
 ];
 const powerShellExecutable = process.platform === 'win32' ? 'powershell' : 'pwsh';
