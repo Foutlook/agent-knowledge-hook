@@ -4641,6 +4641,7 @@ test('bin entry import has no CLI side effects', async () => {
     `await import(${JSON.stringify(entryUrl)});`,
   ], {
     encoding: 'utf8',
+    timeout: 5000,
   });
 
   assert.equal(stdout, '');
