@@ -19,12 +19,7 @@ import {
   FILE_LOCK_TIMEOUT_MS,
   RFC4122_UUID_PATTERN,
 } from './locks.js';
-
-const RESOLVABLE_FIX_CATEGORIES = new Set([
-  'fixes',
-  'prd-corrections',
-  'tech-solution-corrections',
-]);
+import { TARGETED_FIX_CATEGORIES } from './targeted-fix-contract.js';
 
 export async function resolveFix({
   rootDir,
@@ -568,7 +563,7 @@ function normalizeResolveSourceLocation(baseDir, file) {
   const parts = relativeSource.split('/');
   if (parts.length !== 3
       || parts[0] !== 'inbox'
-      || !RESOLVABLE_FIX_CATEGORIES.has(parts[1])
+      || !TARGETED_FIX_CATEGORIES.has(parts[1])
       || !isMarkdownPathForPlatform(parts[2])) {
     throw new Error(`resolveFix source 只允许固定分类下的直接 Markdown 文件: ${relativeSource}`);
   }
@@ -1069,4 +1064,3 @@ function parseFrontmatterPreservingBody(raw) {
     body: raw.slice(closingIndex + closingMarker.length),
   };
 }
-

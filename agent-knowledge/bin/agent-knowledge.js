@@ -50,6 +50,7 @@ import {
   syncCommandDocs,
 } from '../lib/repository-maintenance.js';
 import { resolveFix } from '../lib/resolve-fix.js';
+import { TARGETED_FIX_CATEGORIES } from '../lib/targeted-fix-contract.js';
 
 export {
   addRule,
@@ -70,11 +71,6 @@ export {
 
 const ADJACENT_LOCK_FILE_PATTERN = /\.md\.lock(?:\.reclaim)?$/;
 const RESOLVE_LOCK_FILE_PATTERN = /^[0-9a-f]{64}\.lock(?:\.reclaim)?$/;
-const DOCTOR_TARGETED_FIX_CATEGORIES = new Set([
-  'fixes',
-  'prd-corrections',
-  'tech-solution-corrections',
-]);
 
 const GLOBAL_OPTION_SUPPORT = Object.freeze({
   json: new Set(['before-task', 'search', 'check-stale', 'doctor']),
@@ -216,7 +212,7 @@ function validateDoctorFixMetadata(frontmatter, relativePath, issues) {
   // 空白 target 与独立 fix 等价；只有固定纠偏分类中的 pending targeted fix 才受闭环元数据约束。
   if (parts.length !== 3
       || parts[0] !== 'inbox'
-      || !DOCTOR_TARGETED_FIX_CATEGORIES.has(parts[1])
+      || !TARGETED_FIX_CATEGORIES.has(parts[1])
       || readFrontmatterField(frontmatter, 'status') !== 'pending'
       || !target) {
     return;
