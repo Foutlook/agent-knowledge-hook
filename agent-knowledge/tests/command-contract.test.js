@@ -55,7 +55,7 @@ const cliEntryPath = fileURLToPath(new URL('../bin/agent-knowledge.js', import.m
 const akEntryPath = fileURLToPath(new URL('../bin/ak.ps1', import.meta.url));
 const repositoryRootPath = fileURLToPath(new URL('../../', import.meta.url));
 const commandContractTestPath = fileURLToPath(import.meta.url);
-const cliRuntimeModuleNames = ['command-contract.js', 'knowledge-files.js', 'locks.js'];
+const cliRuntimeModuleNames = ['command-contract.js', 'knowledge-files.js', 'locks.js', 'retrieval.js'];
 const powerShellExecutable = process.platform === 'win32' ? 'powershell' : 'pwsh';
 const blockBegin = '<!-- BEGIN GENERATED: TEST_BLOCK -->';
 const blockEnd = '<!-- END GENERATED: TEST_BLOCK -->';
