@@ -4613,6 +4613,40 @@ test('strict CLI list-pending rejects unknown arguments', async () => {
   assert.match(`${error.stderr}${error.stdout}`, /list-pending.*未知参数.*--unknown/);
 });
 
+test('public entry exports remain stable for programmatic consumers', () => {
+  assert.deepEqual(Object.keys(agentKnowledgeModule).sort(), [
+    'addRule',
+    'checkStale',
+    'doctor',
+    'extractKeywords',
+    'extractQueryKeywords',
+    'listPending',
+    'promote',
+    'recordFix',
+    'refreshProject',
+    'resolveFix',
+    'searchKnowledge',
+    'syncAdapters',
+    'syncCommandDocs',
+    'writeFileAtomic',
+    'writeUniqueFile',
+  ].sort());
+});
+
+test('bin entry import has no CLI side effects', async () => {
+  const entryUrl = new URL('../bin/agent-knowledge.js', import.meta.url).href;
+  const { stdout, stderr } = await execFileAsync(process.execPath, [
+    '--input-type=module',
+    '--eval',
+    `await import(${JSON.stringify(entryUrl)});`,
+  ], {
+    encoding: 'utf8',
+  });
+
+  assert.equal(stdout, '');
+  assert.equal(stderr, '');
+});
+
 test('CLI unknown command returns non-zero and readable error', async () => {
   const error = await runCliFailure(['unknown-command'], {
     cwd: await createTempRoot(),
