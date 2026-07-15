@@ -52,10 +52,12 @@ const akCommandNames = [
 ];
 
 const cliEntryPath = fileURLToPath(new URL('../bin/agent-knowledge.js', import.meta.url));
+const cliSourcePath = fileURLToPath(new URL('../lib/cli.js', import.meta.url));
 const akEntryPath = fileURLToPath(new URL('../bin/ak.ps1', import.meta.url));
 const repositoryRootPath = fileURLToPath(new URL('../../', import.meta.url));
 const commandContractTestPath = fileURLToPath(import.meta.url);
 const cliRuntimeModuleNames = [
+  'cli.js',
   'command-contract.js',
   'doctor.js',
   'knowledge-files.js',
@@ -524,7 +526,7 @@ for (const { name, contractContent } of [
 test('Node 顶层命令路由与契约双向一致', async () => {
   const [contract, source] = await Promise.all([
     loadCommandContract(),
-    readFile(cliEntryPath, 'utf8'),
+    readFile(cliSourcePath, 'utf8'),
   ]);
 
   assertRouteContractEqual(
@@ -536,7 +538,7 @@ test('Node 顶层命令路由与契约双向一致', async () => {
 test('路由一致性检查拒绝源码多出的标准路由', async () => {
   const [contract, source] = await Promise.all([
     loadCommandContract(),
-    readFile(cliEntryPath, 'utf8'),
+    readFile(cliSourcePath, 'utf8'),
   ]);
   const sourceWithExtraRoute = [
     source,
@@ -557,7 +559,7 @@ test('路由一致性检查拒绝源码多出的标准路由', async () => {
 test('路由一致性检查拒绝契约多出的命令', async () => {
   const [contract, source] = await Promise.all([
     loadCommandContract(),
-    readFile(cliEntryPath, 'utf8'),
+    readFile(cliSourcePath, 'utf8'),
   ]);
 
   assert.throws(
