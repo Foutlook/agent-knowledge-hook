@@ -99,6 +99,10 @@ agent-knowledge sync-command-docs [--check] --repository-root <path>
 
 命令是否支持 `--json` 由统一命令契约维护，以本页上方生成命令清单中的 `[--json]` 标记为准。其中 `doctor --json` 无论检查通过还是发现 error，都会在 stdout 输出唯一的合法 JSON 对象，便于自动化管线直接解析。
 
+CLI 会先按命令契约严格校验参数。未知参数、重复参数、缺失参数值、意外的位置参数，以及当前命令不支持的全局参数都会在任何业务读写前被拒绝。
+
+兼容说明：`ak.ps1` 会给短命令统一注入 `--knowledge-root`，因此 `sync-adapters` 接受但不使用该参数；适配器模板仍只从 `--repository-root` 指向的工具仓库读取。
+
 ## 命令使用姿势
 
 ### before-task
@@ -113,8 +117,9 @@ agent-knowledge before-task "修复 queryEntityGraph 实体图谱 ownerId 为空
 
 检索增强说明：
 
-- **同义词扩展**：`synonyms.json` 维护业务术语别名（如 `队列↔排队↔queue`、`错题本↔错题↔wrong-question`）。查询中的词会被扩展成整组候选词再匹配，缓解中文子串匹配无法互通近义的问题。中文短语还会按相邻 2-gram 切分（如 `队列为空` → `队列`），使长句里的关键词也能被召回。
-- **覆盖率优先排序**：结果先按「命中的查询词比例（coverage）」排序，再按标题/文件名整词精确命中加权，最后按累计得分。这样整词精确命中的文件不会被长正文靠零散词堆砌反超。
+- **同义词查询组**：`synonyms.json` 维护业务术语别名（如 `队列↔排队↔queue`、`错题本↔错题↔wrong-question`）。同一组内的大小写变体和多个别名只按一个查询意图计分，避免扩展词重复抬高覆盖率。中文短语还会按相邻 2-gram 切分（如 `队列为空` → `队列`），使长句里的关键词也能被召回。
+- **查询组覆盖率排序**：结果先按「命中的查询组比例（coverage）」排序，再按标题/文件名整词精确命中加权，最后按累计得分。这样整词精确命中的文件不会被长正文靠零散词堆砌反超。
+- **必须阅读分级**：只有 `knowledge/` 下的已确认知识，且查询组覆盖率不低于 50%，并由标题、文件名、frontmatter 高置信命中，或正文至少命中两个查询组且正文覆盖率不低于 60%，才进入“必须阅读”；最多 5 项，其余结果保留为“可能相关”。
 - **命中摘要**：每项附带首个命中关键词附近的 `摘要`，减少逐一打开文件的成本。
 - **任务时过期提示**：若知识文件 frontmatter 带有 `project_root` 与 `last_scanned_commit`，且项目 HEAD 已变，会在该项后标注 `⚠可能过期`，提醒先 `refresh-project`。
 
@@ -224,7 +229,7 @@ ak resolve inbox/<分类>/<旧纠偏文件>.md --confirm-legacy
 agent-knowledge check-stale --project-root <workspace-root>\reasearch-hub --knowledge-file knowledge/domain/project-reasearch-hub.md --knowledge-root <workspace-root>\team-agent-knowledge
 ```
 
-`check-stale` 会读取知识文件 frontmatter 中的 `last_scanned_commit`，再对比 `--project-root` 当前 `git rev-parse HEAD`。如果两者不同，输出“可能过期”；如果缺少 `last_scanned_commit`，也会提示需要刷新。它只做检测，不会自动覆盖人工知识。
+`check-stale` 会读取知识文件 frontmatter 中的 `last_scanned_commit`，再对比 `--project-root` 当前 `git rev-parse HEAD`。如果两者不同，输出“可能过期”；如果缺少 `last_scanned_commit`，也会提示需要刷新。它只接受当前知识库 `knowledge/` 下、`status: confirmed` 的真实 Markdown 普通文件；越界路径以及通过 symlink / junction 逃逸真实根目录的路径会被拒绝。它只做检测，不会自动覆盖人工知识。
 
 加上 `--deep` 后会做**深度过期**检测：读取 frontmatter 的 `evidence_files`（逗号分隔的相对路径列表），用 `git diff --name-only <last_scanned_commit>..HEAD` 与变更文件求交集。即使 HEAD 已变，只要知识依赖的源文件没动就未必需要刷新；反之若依赖文件被改，则精确报出命中项。
 
@@ -246,7 +251,7 @@ agent-knowledge check-stale --project-root <workspace-root>\reasearch-hub --know
 agent-knowledge refresh-project --project-root <workspace-root>\reasearch-hub --knowledge-file knowledge/domain/project-reasearch-hub.md --summary "同步 Facade 和模块结构变化" --knowledge-root <workspace-root>\team-agent-knowledge
 ```
 
-`refresh-project` 会更新 `updated`、`project_root`、`last_scanned_commit`，并在正文末尾追加“刷新记录”。它不会自动重写项目说明正文；正文里的业务规则、接口关系和证据链仍需要由 Codex 或人工基于当前代码确认后再修改。
+`refresh-project` 会更新 `updated`、`project_root`、`last_scanned_commit`，并在正文末尾追加“刷新记录”。它只接受当前知识库 `knowledge/` 下、`status: confirmed` 的真实 Markdown 普通文件，并在取得写锁后重新校验真实路径，避免检查与写入之间目标被替换。它不会自动重写项目说明正文；正文里的业务规则、接口关系和证据链仍需要由 Codex 或人工基于当前代码确认后再修改。
 
 推荐顺序：
 
@@ -266,7 +271,7 @@ agent-knowledge refresh-project --project-root <workspace-root>\reasearch-hub --
 agent-knowledge promote --file inbox/rules/2026-07-09-aggregation-rule.md
 ```
 
-`promote` 只接受 `inbox/` 下的文件；若误传 `knowledge/` 下的文件会报错。带非空 `target` 的 targeted fix 会在任何写入前被拒绝：这类纠偏必须先修改目标正式知识，再执行 `resolve-fix`。普通规则草稿和不带 `target` 的独立 fix 仍可在人工确认后晋升。晋升后原 inbox 文件会被删除，新文件落在 `knowledge/` 对应目录。如果团队还有「项目索引」或「规则索引」需要同步引用，晋升后可人工补一条索引引用。
+`promote` 只接受 `inbox/` 下的真实 Markdown 普通文件；若误传 `knowledge/` 下的文件会报错。源文件和目标目录都会校验真实路径，目标目录链中存在 symlink / junction 时会在创建子目录或写文件前拒绝。带非空 `target` 的 targeted fix 会在任何写入前被拒绝：这类纠偏必须先修改目标正式知识，再执行 `resolve-fix`。普通规则草稿和不带 `target` 的独立 fix 仍可在人工确认后晋升。晋升后原 inbox 文件会被删除，新文件落在 `knowledge/` 对应目录。如果团队还有「项目索引」或「规则索引」需要同步引用，晋升后可人工补一条索引引用。
 
 典型节奏：规则草稿或独立 fix 在 `inbox/` 沉淀一段时间后，由人工确认其长期有效性，再用 `promote` 晋升；targeted fix 则通过 `resolve-fix` 关闭，不得为了清理 inbox 而晋升。
 
@@ -325,7 +330,7 @@ agent-knowledge doctor --json
 
 各字段含义：
 
-- `before-task` / `search`：`results[].mustRead`（是否必须阅读）、`coverage`（查询词命中比例）、`matched` / `total`、`stale`、`staleReason`、`snippet`、`hits`。
+- `before-task` / `search`：顶层 `queryTerms`（原始查询词）、`expandedTerms`（同义词与中文 2-gram 展开词）；`results[].mustRead`、`mustReadReason`（分级原因）、`coverage`（查询组命中比例）、`matched` / `total`、`matchedTerms`、`reasonCodes`（命中字段）、`stale`、`staleReason`、`snippet`、`hits`。兼容字段 `keywords` 保留，并返回实际展开词。
 - `check-stale`：`scannedCommit`、`currentCommit`、`stale`、`reason`，以及 `--deep` 时的 `deep.hitFiles` 等。
 - `doctor`：`ok`、`checkedFiles` 与按 `file + code + message` 稳定排序的 `issues`。检查通过或失败时，stdout 都只输出一个合法 JSON 对象。
 

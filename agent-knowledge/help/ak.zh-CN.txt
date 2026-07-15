@@ -50,6 +50,8 @@ ak check poseidon --json
 ak doctor --json
 ```
 
+底层 CLI 会严格校验参数；未知参数、重复参数、缺失参数值和当前命令不支持的全局参数都会在执行前报错。
+
 ## task
 
 用法：
@@ -60,7 +62,7 @@ ak task "分析实体图谱 ownerId 为空"
 
 作用：
 
-任务开始前根据任务描述检索团队知识库，输出“必须阅读项”和“可能相关项”。
+任务开始前根据任务描述检索团队知识库，输出“必须阅读项”和“可能相关项”。同义词按查询组计算，组内别名只计一次覆盖率；只有高覆盖、高置信的已确认知识进入必须阅读，最多 5 项。
 
 什么时候用：
 
@@ -88,7 +90,7 @@ ak search "聚合接口 数据源一致"
 
 作用：
 
-按关键词搜索知识库，返回命中的规则、项目说明、服务关系、历史坑或纠错记录。
+按关键词搜索知识库，返回命中的规则、项目说明、服务关系、历史坑或纠错记录。结果按查询组覆盖率优先排序，并附带实际命中词和命中字段原因。
 
 什么时候用：
 
@@ -144,6 +146,7 @@ ak check poseidon
 
 - 项目路径：来自项目知识文件 `project_root`，或项目索引 `workspace-projects.md`
 - 知识文件：默认匹配 `knowledge/domain/project-<项目名>.md`
+- 安全边界：只接受当前知识库 `knowledge/` 下、`status: confirmed` 的真实 Markdown 普通文件，不跟随越出知识库真实根的 symlink / junction
 
 什么时候用：
 
@@ -200,6 +203,8 @@ ak refresh poseidon "同步本次需求合并后的模块变化"
 重要边界：
 
 `ak refresh` 不会自动重写项目说明正文。它只表示“这份知识已经核对到当前 commit”。如果正文没有更新，不能只靠 refresh 假装知识已经最新。
+
+目标必须是当前知识库 `knowledge/` 下、`status: confirmed` 的真实 Markdown 普通文件；写锁取得后还会重新校验真实路径。
 
 底层动作：
 
@@ -419,6 +424,7 @@ inbox/<子目录>/<文件名>.md -> knowledge/<子目录>/<文件名>.md
 安全边界：
 
 - 只接受 `inbox/` 下的文件
+- 源文件必须是真实 Markdown 普通文件，目标目录链不能包含 symlink / junction
 - 如果目标 `knowledge/` 文件已经存在，会直接报错，不会覆盖已有已确认知识
 - 带非空 `target` 的 targeted fix 会在任何写入前拒绝；必须先修改并审核目标，再执行 `ak resolve`
 
@@ -535,7 +541,7 @@ ak doctor --json
 
 作用：
 
-让查询类命令输出 JSON，便于 Codex、OpenCode 或其它自动化脚本直接解析。
+让查询类命令输出 JSON，便于 Codex、OpenCode 或其它自动化脚本直接解析。`task` / `search` 会返回 `queryTerms`、`expandedTerms`，以及每项结果的 `mustReadReason`、`matchedTerms`、`reasonCodes` 等可解释字段；兼容字段 `keywords` 保留。
 
 支持范围：
 

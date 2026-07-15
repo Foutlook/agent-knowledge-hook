@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   addRule,
+  checkStale,
   extractKeywords,
   extractQueryKeywords,
   listPending,
@@ -1979,6 +1980,194 @@ test('CLI refresh-project updates project metadata and appends a refresh record 
   assert.match(content, new RegExp(currentCommit.slice(0, 12)));
   assert.match(content, /同步 README 变化/);
   await assertNoBom(knowledgeFile);
+});
+
+test('knowledge path boundary rejects check-stale outside the configured knowledge root', async () => {
+  const projectRoot = await createGitProject();
+  const knowledgeRoot = await createTempRoot();
+  const externalRoot = await createTempRoot();
+  const externalFile = await writeExternalKnowledgeFile(
+    externalRoot,
+    'knowledge/domain/external.md',
+    ['---', 'title: external', 'status: confirmed', '---', '', '# external', ''].join('\n'),
+  );
+
+  await assert.rejects(
+    checkStale({ knowledgeRoot, projectRoot, knowledgeFile: externalFile }),
+    /check-stale.*当前知识库|知识库.*越界/,
+  );
+});
+
+test('knowledge path boundary rejects refresh-project outside the configured knowledge root without modifying it', async () => {
+  const projectRoot = await createGitProject();
+  const knowledgeRoot = await createTempRoot();
+  const externalRoot = await createTempRoot();
+  const externalFile = await writeExternalKnowledgeFile(
+    externalRoot,
+    'knowledge/domain/external-refresh.md',
+    ['---', 'title: external refresh', 'status: confirmed', '---', '', '# external refresh', ''].join('\n'),
+  );
+  const before = await readFile(externalFile, 'utf8');
+
+  await assert.rejects(
+    refreshProject({ knowledgeRoot, projectRoot, knowledgeFile: externalFile }),
+    /refresh-project.*当前知识库|知识库.*越界/,
+  );
+  assert.equal(await readFile(externalFile, 'utf8'), before);
+  assert.ok(!existsSync(`${externalFile}.lock`));
+});
+
+test('knowledge path boundary requires confirmed knowledge files for check and refresh', async () => {
+  const projectRoot = await createGitProject();
+  const knowledgeRoot = await createTempRoot();
+  const draft = await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'inbox/domain/project-draft.md',
+    ['---', 'title: draft', 'status: draft', '---', '', '# draft', ''].join('\n'),
+  );
+  const pendingKnowledge = await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/project-pending.md',
+    ['---', 'title: pending', 'status: pending', '---', '', '# pending', ''].join('\n'),
+  );
+  const pendingBefore = await readFile(pendingKnowledge, 'utf8');
+
+  await assert.rejects(
+    checkStale({ knowledgeRoot, projectRoot, knowledgeFile: draft }),
+    /check-stale.*knowledge\//,
+  );
+  await assert.rejects(
+    refreshProject({ knowledgeRoot, projectRoot, knowledgeFile: pendingKnowledge }),
+    /refresh-project.*confirmed/,
+  );
+  assert.equal(await readFile(pendingKnowledge, 'utf8'), pendingBefore);
+});
+
+test('knowledge path boundary rejects a knowledge directory link escaping the real root', async (t) => {
+  const projectRoot = await createGitProject();
+  const knowledgeRoot = await createTempRoot();
+  const externalDir = await createTempRoot();
+  await writeFile(
+    path.join(externalDir, 'escaped.md'),
+    ['---', 'title: escaped', 'status: confirmed', '---', '', '# escaped', ''].join('\n'),
+    'utf8',
+  );
+  await mkdir(path.join(knowledgeRoot, 'knowledge'), { recursive: true });
+  if (!await createDirectoryLink(t, externalDir, path.join(knowledgeRoot, 'knowledge', 'domain'))) {
+    return;
+  }
+
+  await assert.rejects(
+    checkStale({
+      knowledgeRoot,
+      projectRoot,
+      knowledgeFile: 'knowledge/domain/escaped.md',
+    }),
+    /check-stale.*真实路径|知识库.*越界/,
+  );
+});
+
+test('knowledge path boundary locks an internal directory-link alias by the real knowledge file', async (t) => {
+  const knowledgeRoot = await createTempRoot();
+  const domainRoot = path.join(knowledgeRoot, 'knowledge', 'domain');
+  const knowledgeFile = await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/internal-lock.md',
+    '---\ntitle: Internal lock\nstatus: confirmed\n---\n\n# Internal lock\n',
+  );
+  const linkedDomainRoot = path.join(knowledgeRoot, 'knowledge', 'linked-domain');
+  if (!await createDirectoryLink(t, domainRoot, linkedDomainRoot)) {
+    return;
+  }
+  const before = await readFile(knowledgeFile, 'utf8');
+  await writeFile(
+    `${knowledgeFile}.lock`,
+    `${process.pid}:00000000-0000-4000-8000-000000000001`,
+    'utf8',
+  );
+
+  await assert.rejects(
+    refreshProject({
+      knowledgeRoot,
+      projectRoot: await createTempRoot(),
+      knowledgeFile: 'knowledge/linked-domain/internal-lock.md',
+      summary: 'must not bypass the canonical lock',
+      lockTimeoutMs: 80,
+      lockRetryDelayMs: 10,
+    }),
+    /等待文件锁超时/,
+  );
+  assert.equal(await readFile(knowledgeFile, 'utf8'), before);
+  assert.equal(
+    await readFile(path.join(linkedDomainRoot, 'internal-lock.md.lock'), 'utf8'),
+    `${process.pid}:00000000-0000-4000-8000-000000000001`,
+  );
+});
+
+test('knowledge path boundary rejects promote through an inbox directory link without touching external source', async (t) => {
+  const knowledgeRoot = await createTempRoot();
+  const externalDir = await createTempRoot();
+  const externalSource = path.join(externalDir, 'external-draft.md');
+  const sourceContent = ['---', 'title: external draft', 'status: draft', '---', '', '# external draft', ''].join('\n');
+  await writeFile(externalSource, sourceContent, 'utf8');
+  await mkdir(path.join(knowledgeRoot, 'inbox'), { recursive: true });
+  if (!await createDirectoryLink(t, externalDir, path.join(knowledgeRoot, 'inbox', 'rules'))) {
+    return;
+  }
+
+  await assert.rejects(
+    promote({ knowledgeRoot, file: 'inbox/rules/external-draft.md' }),
+    /promote.*真实路径|知识库.*越界/,
+  );
+  assert.equal(await readFile(externalSource, 'utf8'), sourceContent);
+  assert.ok(!existsSync(path.join(knowledgeRoot, 'knowledge')));
+});
+
+test('knowledge path boundary rejects an external promote target before creating directories there', async (t) => {
+  const knowledgeRoot = await createTempRoot();
+  const externalTargetRoot = await createTempRoot();
+  const source = await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'inbox/rules/safe-source.md',
+    ['---', 'title: safe source', 'status: draft', '---', '', '# safe source', ''].join('\n'),
+  );
+  if (!await createDirectoryLink(t, externalTargetRoot, path.join(knowledgeRoot, 'knowledge'))) {
+    return;
+  }
+
+  await assert.rejects(
+    promote({ knowledgeRoot, file: 'inbox/rules/safe-source.md' }),
+    /promote.*目录链接|promote.*真实路径/,
+  );
+  assert.ok(existsSync(source));
+  assert.ok(!existsSync(path.join(externalTargetRoot, 'rules')));
+});
+
+test('knowledge path boundary rejects a promoted file symlink', async (t) => {
+  const knowledgeRoot = await createTempRoot();
+  const actualSource = await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'inbox/rules/actual-draft.md',
+    ['---', 'title: actual draft', 'status: draft', '---', '', '# actual draft', ''].join('\n'),
+  );
+  const linkedSource = path.join(knowledgeRoot, 'inbox', 'rules', 'linked-draft.md');
+  try {
+    await symlink(actualSource, linkedSource, 'file');
+  } catch (error) {
+    if (['EACCES', 'ENOTSUP', 'EPERM'].includes(error?.code)) {
+      t.skip(`file links are unavailable on this platform: ${error.code}`);
+      return;
+    }
+    throw error;
+  }
+
+  await assert.rejects(
+    promote({ knowledgeRoot, file: 'inbox/rules/linked-draft.md' }),
+    /promote.*符号链接/,
+  );
+  assert.ok(existsSync(actualSource));
+  assert.ok(existsSync(linkedSource));
+  assert.ok(!existsSync(path.join(knowledgeRoot, 'knowledge')));
 });
 
 test('recordFix writes a complete fix_id without target fields for a standalone fix', async () => {
@@ -4280,6 +4469,150 @@ test('CLI record-fix rejects --target without a file path', async () => {
   assert.ok(!existsSync(path.join(knowledgeRoot, 'inbox', 'tech-solution-corrections')));
 });
 
+test('strict CLI record-fix rejects an unknown option before writing', async () => {
+  const knowledgeRoot = await createTempRoot();
+  const error = await runCliFailure([
+    'record-fix',
+    '--type',
+    'tech',
+    '--title',
+    '参数拼写错误',
+    '--targte',
+    'knowledge/rules/target.md',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  assert.notEqual(error.code, 0);
+  assert.match(`${error.stderr}${error.stdout}`, /record-fix.*未知参数.*--targte/);
+  assert.ok(!existsSync(path.join(knowledgeRoot, 'inbox')));
+});
+
+test('strict CLI record-fix rejects duplicate command options before writing', async () => {
+  const knowledgeRoot = await createTempRoot();
+  const error = await runCliFailure([
+    'record-fix',
+    '--type',
+    'bug',
+    '--type',
+    'tech',
+    '--title',
+    '重复类型',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  assert.notEqual(error.code, 0);
+  assert.match(`${error.stderr}${error.stdout}`, /record-fix.*--type.*一次/);
+  assert.ok(!existsSync(path.join(knowledgeRoot, 'inbox')));
+});
+
+test('strict CLI record-fix rejects unsupported and duplicate global options before writing', async () => {
+  const firstKnowledgeRoot = await createTempRoot();
+  const secondKnowledgeRoot = await createTempRoot();
+  const unsupportedJson = await runCliFailure([
+    'record-fix',
+    '--type',
+    'tech',
+    '--title',
+    '不支持 JSON',
+    '--json',
+    '--knowledge-root',
+    firstKnowledgeRoot,
+  ]);
+  const duplicateRoot = await runCliFailure([
+    'record-fix',
+    '--type',
+    'tech',
+    '--title',
+    '重复知识库根',
+    '--knowledge-root',
+    firstKnowledgeRoot,
+    '--knowledge-root',
+    secondKnowledgeRoot,
+  ]);
+
+  assert.match(`${unsupportedJson.stderr}${unsupportedJson.stdout}`, /record-fix.*--json/);
+  assert.match(`${duplicateRoot.stderr}${duplicateRoot.stdout}`, /--knowledge-root.*一次/);
+  assert.ok(!existsSync(path.join(firstKnowledgeRoot, 'inbox')));
+  assert.ok(!existsSync(path.join(secondKnowledgeRoot, 'inbox')));
+});
+
+test('strict CLI query commands reject unknown option-like arguments', async () => {
+  const knowledgeRoot = await createTempRoot();
+  for (const command of ['search', 'before-task']) {
+    const error = await runCliFailure([
+      command,
+      '知识库检索',
+      '--targte',
+      'unexpected',
+      '--knowledge-root',
+      knowledgeRoot,
+    ]);
+
+    assert.match(`${error.stderr}${error.stdout}`, new RegExp(`${command}.*未知参数.*--targte`));
+  }
+});
+
+test('strict CLI promote rejects extra arguments before moving the source', async () => {
+  const knowledgeRoot = await createTempRoot();
+  const source = await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'inbox/rules/strict-promote.md',
+    ['---', 'title: strict promote', 'status: draft', '---', '', '# strict promote', ''].join('\n'),
+  );
+  const error = await runCliFailure([
+    'promote',
+    '--file',
+    'inbox/rules/strict-promote.md',
+    'unexpected-position',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  assert.match(`${error.stderr}${error.stdout}`, /promote.*位置参数.*unexpected-position/);
+  assert.ok(existsSync(source));
+  assert.ok(!existsSync(path.join(knowledgeRoot, 'knowledge')));
+});
+
+test('strict CLI refresh-project rejects duplicate options before modifying knowledge', async () => {
+  const projectRoot = await createGitProject();
+  const knowledgeRoot = await createTempRoot();
+  const knowledgeFile = await writeExternalKnowledgeFile(
+    knowledgeRoot,
+    'knowledge/domain/project-strict-refresh.md',
+    ['---', 'title: strict refresh', 'status: confirmed', '---', '', '# strict refresh', ''].join('\n'),
+  );
+  const before = await readFile(knowledgeFile, 'utf8');
+  const error = await runCliFailure([
+    'refresh-project',
+    '--project-root',
+    projectRoot,
+    '--knowledge-file',
+    'knowledge/domain/project-strict-refresh.md',
+    '--knowledge-file',
+    'knowledge/domain/project-strict-refresh.md',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  assert.match(`${error.stderr}${error.stdout}`, /refresh-project.*--knowledge-file.*一次/);
+  assert.equal(await readFile(knowledgeFile, 'utf8'), before);
+  assert.ok(!existsSync(`${knowledgeFile}.lock`));
+});
+
+test('strict CLI list-pending rejects unknown arguments', async () => {
+  const knowledgeRoot = await createTempRoot();
+  const error = await runCliFailure([
+    'list-pending',
+    '--unknown',
+    '--knowledge-root',
+    knowledgeRoot,
+  ]);
+
+  assert.match(`${error.stderr}${error.stdout}`, /list-pending.*未知参数.*--unknown/);
+});
+
 test('CLI unknown command returns non-zero and readable error', async () => {
   const error = await runCliFailure(['unknown-command'], {
     cwd: await createTempRoot(),
@@ -4373,6 +4706,174 @@ test('extractQueryKeywords segments Chinese phrases into bigrams and expands syn
   assert.ok(keywords.includes('队列'));
   assert.ok(keywords.includes('排队'));
   assert.ok(keywords.includes('queue'));
+});
+
+test('query groups deduplicate synonym case variants', () => {
+  const keywords = extractQueryKeywords('queue 队列 Graph graph');
+
+  assert.equal(keywords.filter((keyword) => keyword.toLowerCase() === 'queue').length, 1);
+  assert.equal(keywords.filter((keyword) => keyword.toLowerCase() === 'graph').length, 1);
+  assert.ok(keywords.includes('队列'));
+  assert.ok(keywords.includes('图谱'));
+});
+
+test('query groups count one synonym group once for score coverage', async () => {
+  const rootDir = await createTempRoot();
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/queue.md',
+    [
+      '---',
+      'title: Queue 限流',
+      'tags: [Queue]',
+      'status: confirmed',
+      '---',
+      '',
+      '# Queue 限流',
+      '',
+      'Queue backlog handling.',
+      '',
+    ].join('\n'),
+  );
+
+  const [result] = await searchKnowledge({ rootDir, query: '队列' });
+
+  assert.equal(result.coverage, 1);
+  assert.equal(result.matched, 1);
+  assert.equal(result.total, 1);
+  assert.deepEqual(result.matchedTerms, ['queue']);
+});
+
+test('mustRead v2 keeps low-coverage body matches related instead of required', async () => {
+  const rootDir = await createTempRoot();
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/body-only.md',
+    [
+      '---',
+      'title: unrelated body note',
+      'status: confirmed',
+      '---',
+      '',
+      '# unrelated body note',
+      '',
+      'alpha beta gamma',
+      '',
+    ].join('\n'),
+  );
+
+  const [result] = await searchKnowledge({
+    rootDir,
+    query: 'alpha beta gamma delta epsilon zeta',
+  });
+
+  assert.equal(result.score, 8, 'fixture must reproduce the legacy score threshold');
+  assert.equal(result.coverage, 0.5);
+  assert.equal(result.mustRead, false);
+  assert.equal(result.mustReadReason, 'related_low_confidence');
+});
+
+test('mustRead v2 requires a high-coverage title or frontmatter match', async () => {
+  const rootDir = await createTempRoot();
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/graph-datasource.md',
+    [
+      '---',
+      'title: graph datasource consistency',
+      'tags: [graph, datasource]',
+      'status: confirmed',
+      '---',
+      '',
+      '# graph datasource consistency',
+      '',
+      'Keep graph ownership data consistent.',
+      '',
+    ].join('\n'),
+  );
+
+  const [result] = await searchKnowledge({ rootDir, query: 'graph datasource' });
+
+  assert.equal(result.coverage, 1);
+  assert.equal(result.mustRead, true);
+  assert.match(result.mustReadReason, /high_coverage_(title|frontmatter)/);
+  assert.ok(result.reasonCodes.includes('title'));
+  assert.ok(result.reasonCodes.includes('frontmatter'));
+});
+
+test('mustRead v2 caps required knowledge at five results', async () => {
+  const rootDir = await createTempRoot();
+  for (let index = 1; index <= 7; index += 1) {
+    await writeKnowledgeFile(
+      rootDir,
+      `knowledge/rules/alpha-${index}.md`,
+      [
+        '---',
+        `title: alpha rule ${index}`,
+        'tags: [alpha]',
+        'status: confirmed',
+        '---',
+        '',
+        `# alpha rule ${index}`,
+        '',
+        'alpha',
+        '',
+      ].join('\n'),
+    );
+  }
+
+  const results = await searchKnowledge({ rootDir, query: 'alpha' });
+
+  assert.equal(results.length, 7);
+  assert.equal(results.filter((result) => result.mustRead).length, 5);
+  assert.equal(results.filter((result) => result.mustReadReason === 'must_read_limit').length, 2);
+});
+
+test('mustRead v2 keeps a task-style weak business match out of required results', async () => {
+  const rootDir = await createTempRoot();
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/service-map/agent-knowledge-hook.md',
+    [
+      '---',
+      'title: 优化钩子检索性能缓存索引',
+      'tags: [优化, 钩子, 检索, 性能, 缓存, 索引]',
+      'status: confirmed',
+      '---',
+      '',
+      '# 优化钩子检索性能缓存索引',
+      '',
+      '知识库钩子性能优化入口。',
+      '',
+    ].join('\n'),
+  );
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/domain/business-project.md',
+    [
+      '---',
+      'title: 业务项目说明',
+      'status: confirmed',
+      '---',
+      '',
+      '# 业务项目说明',
+      '',
+      '通用描述中偶然出现钩子、检索和性能。',
+      '',
+    ].join('\n'),
+  );
+
+  const results = await searchKnowledge({
+    rootDir,
+    query: '优化 钩子 检索 性能 缓存 索引',
+  });
+  const hookResult = results.find((result) => result.relativePath.endsWith('agent-knowledge-hook.md'));
+  const businessResult = results.find((result) => result.relativePath.endsWith('business-project.md'));
+
+  assert.equal(hookResult.mustRead, true);
+  assert.equal(businessResult.score, 8, 'fixture must reproduce the legacy score threshold');
+  assert.equal(businessResult.coverage, 0.5);
+  assert.equal(businessResult.mustRead, false);
 });
 
 test('searchKnowledge ranks full-coverage title match above partial body spam and includes snippet', async () => {
@@ -4739,7 +5240,7 @@ test('CLI list-pending lists inbox drafts', async () => {
   assert.match(stdout, /inbox\/rules\/cli-pending\.md/);
 });
 
-test('CLI search --json outputs parseable JSON with mustRead flags', async () => {
+test('CLI search --json outputs parseable JSON with mustRead v2 explanation fields', async () => {
   const knowledgeRoot = await createTempRoot();
   await writeExternalKnowledgeFile(
     knowledgeRoot,
@@ -4770,6 +5271,12 @@ test('CLI search --json outputs parseable JSON with mustRead flags', async () =>
   assert.ok(Array.isArray(parsed.results));
   assert.equal(parsed.results.length, 1);
   assert.equal(parsed.results[0].mustRead, true);
+  assert.deepEqual(parsed.keywords, parsed.expandedTerms);
+  assert.ok(parsed.queryTerms.includes('graph'));
+  assert.ok(parsed.expandedTerms.includes('graph'));
+  assert.ok(parsed.results[0].matchedTerms.includes('graph'));
+  assert.ok(parsed.results[0].reasonCodes.includes('body'));
+  assert.match(parsed.results[0].mustReadReason, /high_coverage/);
 });
 
 test('CLI check-stale --json outputs parseable JSON', async () => {

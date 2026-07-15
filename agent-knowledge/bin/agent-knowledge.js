@@ -68,6 +68,7 @@ const RESOLVE_LOCK_FILE_PATTERN = /^[0-9a-f]{64}\.lock(?:\.reclaim)?$/;
 const execFileAsync = promisify(execFile);
 const FILE_LOCK_TIMEOUT_MS = 5000;
 const FILE_LOCK_RETRY_DELAY_MS = 25;
+const MAX_MUST_READ_RESULTS = 5;
 let temporaryFileSequence = 0;
 const ADAPTER_SPECS = Object.freeze([
   Object.freeze({ fileName: 'knowledge.before-task.md' }),
@@ -95,6 +96,29 @@ const COMMAND_DOC_TARGETS = Object.freeze([
     ]),
   }),
 ]);
+const GLOBAL_OPTION_SUPPORT = Object.freeze({
+  json: new Set(['before-task', 'search', 'check-stale', 'doctor']),
+  knowledgeRoot: new Set([
+    'before-task',
+    'search',
+    'add-rule',
+    'record-fix',
+    'check-stale',
+    'refresh-project',
+    'resolve-fix',
+    'promote',
+    'list-pending',
+    // ak.ps1 会统一注入知识库根；适配器仍只从 repositoryRoot 读取模板，保留该参数仅为兼容既有入口。
+    'sync-adapters',
+    'doctor',
+  ]),
+  repositoryRoot: new Set(['sync-adapters', 'doctor', 'sync-command-docs']),
+});
+const KNOWN_CLI_COMMANDS = new Set([
+  ...GLOBAL_OPTION_SUPPORT.json,
+  ...GLOBAL_OPTION_SUPPORT.knowledgeRoot,
+  ...GLOBAL_OPTION_SUPPORT.repositoryRoot,
+]);
 
 // --- 同义词 / 别名映射（增强召回） ---
 // 同义词文件不存在时退化为无扩展；文件格式为 { 规范词: [别名...] }，
@@ -112,9 +136,22 @@ function loadSynonyms() {
     const raw = readFileSync(candidate, 'utf8');
     const data = JSON.parse(raw);
     for (const [canonical, aliases] of Object.entries(data)) {
-      const group = [canonical, ...(Array.isArray(aliases) ? aliases : [])];
-      for (const term of group) {
-        groups.set(term, group);
+      const terms = [];
+      const normalizedTerms = new Set();
+      for (const term of [canonical, ...(Array.isArray(aliases) ? aliases : [])]) {
+        const normalized = normalizeSearchTerm(term);
+        if (!normalized || normalizedTerms.has(normalized)) {
+          continue;
+        }
+        normalizedTerms.add(normalized);
+        terms.push(term);
+      }
+      const group = {
+        key: [...normalizedTerms].sort().join('\u0000'),
+        terms,
+      };
+      for (const normalized of normalizedTerms) {
+        groups.set(normalized, group);
       }
     }
   } catch {
@@ -125,28 +162,44 @@ function loadSynonyms() {
   return groups;
 }
 
-function expandWithSynonyms(keywords) {
-  const groups = loadSynonyms();
-  const expanded = [...keywords];
-  const seen = new Set(keywords);
-  for (const keyword of keywords) {
-    const group = groups.get(keyword);
-    if (!group) {
+function buildQueryModel(query = '') {
+  const queryTerms = extractKeywords(query);
+  const synonymGroups = loadSynonyms();
+  const groups = [];
+  const groupKeys = new Set();
+  for (const candidate of segmentChineseBigrams(queryTerms)) {
+    const normalizedCandidate = normalizeSearchTerm(candidate);
+    if (!normalizedCandidate) {
       continue;
     }
-    for (const term of group) {
-      if (!seen.has(term)) {
-        seen.add(term);
-        expanded.push(term);
+    const synonymGroup = synonymGroups.get(normalizedCandidate);
+    const group = synonymGroup ?? {
+      key: normalizedCandidate,
+      terms: [candidate],
+    };
+    if (!groupKeys.has(group.key)) {
+      groupKeys.add(group.key);
+      groups.push(group);
+    }
+  }
+
+  const expandedTerms = [];
+  const expandedKeys = new Set();
+  for (const group of groups) {
+    for (const term of group.terms) {
+      const normalized = normalizeSearchTerm(term);
+      if (!expandedKeys.has(normalized)) {
+        expandedKeys.add(normalized);
+        expandedTerms.push(term);
       }
     }
   }
-  return expanded;
+
+  return { queryTerms, groups, expandedTerms };
 }
 
 export function extractQueryKeywords(query = '') {
-  const segmented = segmentChineseBigrams(extractKeywords(query));
-  return expandWithSynonyms(segmented);
+  return buildQueryModel(query).expandedTerms;
 }
 
 // 对长度 >= 3 的中文整词补充相邻 2-gram，使「队列为空」这类短语也能拆出「队列」命中同义词/知识标题。
@@ -172,6 +225,10 @@ function toHalfWidth(text) {
   return String(text)
     .replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
     .replace(/　/g, ' ');
+}
+
+function normalizeSearchTerm(term) {
+  return toHalfWidth(term).normalize('NFKC').trim().toLowerCase();
 }
 
 export function extractKeywords(text = '') {
@@ -220,13 +277,13 @@ function splitIdentifier(identifier) {
 
 export async function searchKnowledge({ rootDir, knowledgeRoot, query } = {}) {
   const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
-  const keywords = extractQueryKeywords(query);
+  const queryModel = buildQueryModel(query);
   const files = await collectMarkdownFiles(knowledgeContext.baseDir);
   const results = [];
 
   for (const filePath of files) {
     const parsed = await parseMarkdownFile(knowledgeContext, filePath);
-    const scored = scoreMarkdownFile(parsed, keywords, keywords.length);
+    const scored = scoreMarkdownFile(parsed, queryModel);
     if (scored.score > 0) {
       const stale = await computeFileStale(parsed);
       results.push({
@@ -243,14 +300,16 @@ export async function searchKnowledge({ rootDir, knowledgeRoot, query } = {}) {
         total: scored.total,
         exactFile: scored.exactFile,
         exactTitle: scored.exactTitle,
+        matchedTerms: scored.matchedTerms,
+        reasonCodes: scored.reasonCodes,
         stale: stale.stale,
         staleReason: stale.reason,
-        snippet: buildSnippet(parsed, keywords),
+        snippet: buildSnippet(parsed, queryModel.expandedTerms),
       });
     }
   }
 
-  return results.sort((left, right) => {
+  const sortedResults = results.sort((left, right) => {
     // 1) 覆盖率优先：命中的查询词比例越高越相关
     if (right.coverage !== left.coverage) {
       return right.coverage - left.coverage;
@@ -270,6 +329,50 @@ export async function searchKnowledge({ rootDir, knowledgeRoot, query } = {}) {
 
     return left.relativePath.localeCompare(right.relativePath);
   });
+  applyMustReadClassification(sortedResults);
+  return sortedResults;
+}
+
+function applyMustReadClassification(results) {
+  let requiredCount = 0;
+  for (const result of results) {
+    const classification = classifyMustRead(result);
+    if (!classification.mustRead) {
+      result.mustRead = false;
+      result.mustReadReason = classification.reason;
+      continue;
+    }
+    if (requiredCount >= MAX_MUST_READ_RESULTS) {
+      result.mustRead = false;
+      result.mustReadReason = 'must_read_limit';
+      continue;
+    }
+    requiredCount += 1;
+    result.mustRead = true;
+    result.mustReadReason = classification.reason;
+  }
+}
+
+function classifyMustRead(result) {
+  if (!result.relativePath.startsWith('knowledge/')) {
+    return { mustRead: false, reason: 'related_unconfirmed' };
+  }
+  if (result.matched === 0 || result.coverage < 0.5) {
+    return { mustRead: false, reason: 'related_low_confidence' };
+  }
+  if (result.hits.includes('标题')) {
+    return { mustRead: true, reason: 'high_coverage_title' };
+  }
+  if (result.hits.includes('文件名')) {
+    return { mustRead: true, reason: 'high_coverage_filename' };
+  }
+  if (result.hits.includes('frontmatter')) {
+    return { mustRead: true, reason: 'high_coverage_frontmatter' };
+  }
+  if (result.coverage >= 0.6 && result.matched >= 2) {
+    return { mustRead: true, reason: 'high_coverage_body' };
+  }
+  return { mustRead: false, reason: 'related_low_confidence' };
 }
 
 // 独占创建候选文件，冲突时递增文件名后缀，避免同标题的连续或并发写入互相覆盖。
@@ -827,6 +930,107 @@ async function isExistingFileWithinRealRoot(rootPath, filePath) {
   }
 }
 
+async function resolveKnowledgeMarkdownFile(baseDir, file, { command, tree }) {
+  const resolvedBaseDir = path.resolve(baseDir);
+  const requestedPath = path.isAbsolute(file)
+    ? path.resolve(file)
+    : path.resolve(resolvedBaseDir, file);
+  const lexicalRelativePath = path.relative(resolvedBaseDir, requestedPath);
+  if (!isPathWithinRoot(lexicalRelativePath)) {
+    throw new Error(`${command} 知识文件必须位于当前知识库内，检测到路径越界: ${file}`);
+  }
+
+  const relativePath = toPosixPath(lexicalRelativePath);
+  if (!relativePath.startsWith(`${tree}/`)) {
+    throw new Error(`${command} 只接受 ${tree}/ 下的知识文件: ${relativePath}`);
+  }
+  if (path.extname(requestedPath).toLowerCase() !== '.md') {
+    throw new Error(`${command} 知识文件必须是 Markdown: ${relativePath}`);
+  }
+
+  let entryStats;
+  let realBaseDir;
+  let realFilePath;
+  let fileStats;
+  try {
+    [entryStats, realBaseDir, realFilePath, fileStats] = await Promise.all([
+      lstat(requestedPath),
+      realpath(resolvedBaseDir),
+      realpath(requestedPath),
+      stat(requestedPath),
+    ]);
+  } catch {
+    throw new Error(`${command} 知识文件不存在或不是普通文件: ${relativePath}`);
+  }
+  if (entryStats.isSymbolicLink()) {
+    throw new Error(`${command} 不接受文件符号链接: ${relativePath}`);
+  }
+  if (!fileStats.isFile()) {
+    throw new Error(`${command} 知识文件不存在或不是普通文件: ${relativePath}`);
+  }
+  if (!isPathWithinRoot(path.relative(realBaseDir, realFilePath))) {
+    throw new Error(`${command} 知识文件真实路径越出当前知识库: ${relativePath}`);
+  }
+
+  return {
+    filePath: requestedPath,
+    realFilePath,
+    relativePath,
+  };
+}
+
+function assertConfirmedKnowledgeFile(command, relativePath, raw) {
+  const status = readFrontmatterField(parseFrontmatter(raw).frontmatter, 'status');
+  if (status !== 'confirmed') {
+    throw new Error(`${command} 只接受 status: confirmed 的 knowledge/ 文件: ${relativePath}`);
+  }
+}
+
+async function prepareKnowledgeDirectory(baseDir, dirPath, command) {
+  const resolvedBaseDir = path.resolve(baseDir);
+  const resolvedDirPath = path.resolve(dirPath);
+  const relativeDirPath = path.relative(resolvedBaseDir, resolvedDirPath);
+  if (!isPathWithinRoot(relativeDirPath)) {
+    throw new Error(`${command} 目标目录必须位于当前知识库内: ${toPosixPath(relativeDirPath)}`);
+  }
+
+  // 逐级检查后再创建，避免 recursive mkdir 先穿过外部 junction/symlink 产生越界副作用。
+  let currentPath = resolvedBaseDir;
+  for (const segment of relativeDirPath.split(path.sep)) {
+    currentPath = path.join(currentPath, segment);
+    let currentStats;
+    try {
+      currentStats = await lstat(currentPath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        throw error;
+      }
+      try {
+        await mkdir(currentPath);
+      } catch (mkdirError) {
+        if (mkdirError?.code !== 'EEXIST') {
+          throw mkdirError;
+        }
+      }
+      currentStats = await lstat(currentPath);
+    }
+    if (currentStats.isSymbolicLink()) {
+      throw new Error(`${command} 目标目录不接受目录链接: ${toPosixPath(path.relative(resolvedBaseDir, currentPath))}`);
+    }
+    if (!currentStats.isDirectory()) {
+      throw new Error(`${command} 目标路径不是目录: ${toPosixPath(path.relative(resolvedBaseDir, currentPath))}`);
+    }
+  }
+
+  const [realBaseDir, realDirPath] = await Promise.all([
+    realpath(resolvedBaseDir),
+    realpath(resolvedDirPath),
+  ]);
+  if (!isPathWithinRoot(path.relative(realBaseDir, realDirPath))) {
+    throw new Error(`${command} 目标目录真实路径越出当前知识库: ${toPosixPath(relativeDirPath)}`);
+  }
+}
+
 async function isExistingDirectory(dirPath) {
   try {
     return (await stat(dirPath)).isDirectory();
@@ -983,21 +1187,20 @@ export async function checkStale({ rootDir, knowledgeRoot, projectRoot, knowledg
   }
 
   const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
-  const filePath = path.isAbsolute(knowledgeFile)
-    ? knowledgeFile
-    : path.join(knowledgeContext.baseDir, knowledgeFile);
-  const raw = await readFile(filePath, 'utf8');
+  const knowledgeFileInfo = await resolveKnowledgeMarkdownFile(
+    knowledgeContext.baseDir,
+    knowledgeFile,
+    { command: 'check-stale', tree: 'knowledge' },
+  );
+  const raw = await readFile(knowledgeFileInfo.realFilePath, 'utf8');
+  assertConfirmedKnowledgeFile('check-stale', knowledgeFileInfo.relativePath, raw);
   const parsed = parseFrontmatter(raw);
   const scannedCommit = readFrontmatterField(parsed.frontmatter, 'last_scanned_commit');
   const currentCommit = await readGitHead(projectRoot);
   const evidenceField = readFrontmatterField(parsed.frontmatter, 'evidence_files');
   const deepResult = deep && evidenceField ? await computeDeepStale(projectRoot, scannedCommit, evidenceField) : null;
-  const relativePath = path.isAbsolute(knowledgeFile)
-    ? toPosixPath(path.relative(knowledgeContext.baseDir, knowledgeFile))
-    : toPosixPath(knowledgeFile);
-
   return {
-    relativePath,
+    relativePath: knowledgeFileInfo.relativePath,
     scannedCommit,
     currentCommit,
     stale: !scannedCommit || scannedCommit !== currentCommit,
@@ -1047,20 +1250,28 @@ export async function refreshProject({
   }
 
   const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
-  const filePath = path.isAbsolute(knowledgeFile)
-    ? knowledgeFile
-    : path.join(knowledgeContext.baseDir, knowledgeFile);
-  const relativePath = path.isAbsolute(knowledgeFile)
-    ? toPosixPath(path.relative(knowledgeContext.baseDir, knowledgeFile))
-    : toPosixPath(knowledgeFile);
-  const releaseLock = await acquireAdjacentFileLock(filePath, {
+  const initialKnowledgeFileInfo = await resolveKnowledgeMarkdownFile(
+    knowledgeContext.baseDir,
+    knowledgeFile,
+    { command: 'refresh-project', tree: 'knowledge' },
+  );
+  const releaseLock = await acquireAdjacentFileLock(initialKnowledgeFileInfo.filePath, {
     timeoutMs: lockTimeoutMs,
     retryDelayMs: lockRetryDelayMs,
   });
 
   try {
-    // 必须在持锁后重读，确保本次更新基于上一位写入者已经提交的完整内容。
-    const raw = await readFile(filePath, 'utf8');
+    // 必须在持锁后重新校验并读取，避免上一位写入者或路径替换改变本次更新的真实目标。
+    const knowledgeFileInfo = await resolveKnowledgeMarkdownFile(
+      knowledgeContext.baseDir,
+      knowledgeFile,
+      { command: 'refresh-project', tree: 'knowledge' },
+    );
+    if (knowledgeFileInfo.realFilePath !== initialKnowledgeFileInfo.realFilePath) {
+      throw new Error(`refresh-project 持锁期间知识文件真实路径发生变化: ${knowledgeFileInfo.relativePath}`);
+    }
+    const raw = await readFile(knowledgeFileInfo.realFilePath, 'utf8');
+    assertConfirmedKnowledgeFile('refresh-project', knowledgeFileInfo.relativePath, raw);
     const parsed = parseFrontmatter(raw);
     const currentCommit = await readGitHead(projectRoot);
     const stamp = timestamp();
@@ -1075,12 +1286,12 @@ export async function refreshProject({
       summary,
     });
 
-    await writeFileAtomic(filePath, `---\n${nextFrontmatter}\n---\n${nextBody}`);
+    await writeFileAtomic(knowledgeFileInfo.realFilePath, `---\n${nextFrontmatter}\n---\n${nextBody}`);
 
     return {
-      relativePath,
+      relativePath: knowledgeFileInfo.relativePath,
       currentCommit,
-      filePath,
+      filePath: knowledgeFileInfo.realFilePath,
     };
   } finally {
     await releaseLock();
@@ -2255,16 +2466,15 @@ export async function promote({ rootDir, knowledgeRoot, file, linkFile = link } 
   }
 
   const knowledgeContext = resolveKnowledgeContext({ rootDir, knowledgeRoot });
-  const sourcePath = path.isAbsolute(file)
-    ? file
-    : path.join(knowledgeContext.baseDir, file);
+  const sourceInfo = await resolveKnowledgeMarkdownFile(
+    knowledgeContext.baseDir,
+    file,
+    { command: 'promote', tree: 'inbox' },
+  );
+  const sourcePath = sourceInfo.realFilePath;
   const raw = await readFile(sourcePath, 'utf8');
   const parsed = parseFrontmatter(raw);
-  const relativeSource = toPosixPath(path.relative(knowledgeContext.baseDir, sourcePath));
-
-  if (!relativeSource.startsWith('inbox/')) {
-    throw new Error(`promote only applies to inbox files, got: ${relativeSource}`);
-  }
+  const relativeSource = sourceInfo.relativePath;
   if (readFrontmatterField(parsed.frontmatter, 'target')) {
     // targeted fix 必须回写原知识并留下快照审计，通用 promote 会制造第二份正式知识。
     throw new Error(
@@ -2275,7 +2485,7 @@ export async function promote({ rootDir, knowledgeRoot, file, linkFile = link } 
   const subPath = relativeSource.slice('inbox/'.length);
   const subDir = path.dirname(subPath);
   const targetDir = path.join(knowledgeContext.baseDir, 'knowledge', subDir);
-  await mkdir(targetDir, { recursive: true });
+  await prepareKnowledgeDirectory(knowledgeContext.baseDir, targetDir, 'promote');
   const targetPath = path.join(targetDir, path.basename(sourcePath));
   const nextFrontmatter = updateFrontmatterFields(parsed.frontmatter, { status: 'confirmed' });
   const content = `---\n${nextFrontmatter}\n---\n${parsed.body}`;
@@ -2596,32 +2806,54 @@ async function readGitHead(projectRoot) {
   return stdout.trim();
 }
 
-function scoreMarkdownFile(parsed, keywords, totalKeywords) {
+function scoreMarkdownFile(parsed, queryModel) {
   let score = 0;
   const hitSet = new Set();
-  const matchedKeywords = new Set();
+  const reasonCodes = new Set();
+  const matchedTermsByGroup = new Map();
 
-  for (const keyword of keywords) {
-    const needle = keyword.toLowerCase();
-    score += scoreField(parsed.fileName, needle, 8, hitSet, '文件名', matchedKeywords, keyword);
-    score += scoreField(parsed.title, needle, 8, hitSet, '标题', matchedKeywords, keyword);
-    score += scoreField(parsed.frontmatter, needle, 6, hitSet, 'frontmatter', matchedKeywords, keyword);
-    score += scoreField(parsed.body, needle, 2, hitSet, '正文', matchedKeywords, keyword);
+  for (const group of queryModel.groups) {
+    score += scoreGroupField(parsed.fileName, group, 8, {
+      hitSet,
+      hitName: '文件名',
+      reasonCodes,
+      reasonCode: 'filename',
+      matchedTermsByGroup,
+    });
+    score += scoreGroupField(parsed.title, group, 8, {
+      hitSet,
+      hitName: '标题',
+      reasonCodes,
+      reasonCode: 'title',
+      matchedTermsByGroup,
+    });
+    score += scoreGroupField(parsed.frontmatter, group, 6, {
+      hitSet,
+      hitName: 'frontmatter',
+      reasonCodes,
+      reasonCode: 'frontmatter',
+      matchedTermsByGroup,
+    });
+    score += scoreGroupField(parsed.body, group, 2, {
+      hitSet,
+      hitName: '正文',
+      reasonCodes,
+      reasonCode: 'body',
+      matchedTermsByGroup,
+    });
   }
 
   // 标题 / 文件名整词精确命中加权，避免长正文靠堆砌零散词胜出
   let exactFile = false;
   let exactTitle = false;
-  const baseName = parsed.fileName.replace(/\.md$/i, '');
-  const titleLower = parsed.title.toLowerCase();
-  for (const keyword of keywords) {
-    const needle = keyword.toLowerCase();
-    const wordBoundary = new RegExp(`(^|[^a-z0-9])${escapeRegExp(needle)}([^a-z0-9]|$)`, 'i');
-    if (wordBoundary.test(baseName.toLowerCase())) {
+  const baseName = normalizeSearchTerm(parsed.fileName.replace(/\.md$/i, ''));
+  const normalizedTitle = normalizeSearchTerm(parsed.title);
+  for (const group of queryModel.groups) {
+    if (group.terms.some((term) => isExactTermMatch(baseName, term))) {
       score += 4;
       exactFile = true;
     }
-    if (wordBoundary.test(titleLower)) {
+    if (group.terms.some((term) => isExactTermMatch(normalizedTitle, term))) {
       score += 4;
       exactTitle = true;
     }
@@ -2631,8 +2863,8 @@ function scoreMarkdownFile(parsed, keywords, totalKeywords) {
     score += 2;
   }
 
-  const matched = matchedKeywords.size;
-  const total = totalKeywords || keywords.length;
+  const matched = matchedTermsByGroup.size;
+  const total = queryModel.groups.length;
   const coverage = total > 0 ? matched / total : 0;
 
   return {
@@ -2643,19 +2875,42 @@ function scoreMarkdownFile(parsed, keywords, totalKeywords) {
     total,
     exactFile,
     exactTitle,
+    matchedTerms: queryModel.groups
+      .filter((group) => matchedTermsByGroup.has(group.key))
+      .map((group) => matchedTermsByGroup.get(group.key)),
+    reasonCodes: [...reasonCodes],
   };
 }
 
-function scoreField(value, needle, points, hitSet, hitName, matchedKeywords, keyword) {
-  if (toHalfWidth(value).toLowerCase().includes(toHalfWidth(needle).toLowerCase())) {
-    hitSet.add(hitName);
-    if (matchedKeywords && keyword) {
-      matchedKeywords.add(keyword);
-    }
-    return points;
+function scoreGroupField(value, group, points, {
+  hitSet,
+  hitName,
+  reasonCodes,
+  reasonCode,
+  matchedTermsByGroup,
+}) {
+  const matchedTerm = findMatchingGroupTerm(value, group);
+  if (!matchedTerm) {
+    return 0;
   }
 
-  return 0;
+  hitSet.add(hitName);
+  reasonCodes.add(reasonCode);
+  if (!matchedTermsByGroup.has(group.key)) {
+    matchedTermsByGroup.set(group.key, normalizeSearchTerm(matchedTerm));
+  }
+  return points;
+}
+
+function findMatchingGroupTerm(value, group) {
+  const normalizedValue = normalizeSearchTerm(value);
+  return group.terms.find((term) => normalizedValue.includes(normalizeSearchTerm(term))) ?? '';
+}
+
+function isExactTermMatch(normalizedValue, term) {
+  const normalizedTerm = normalizeSearchTerm(term);
+  const wordBoundary = new RegExp(`(^|[^a-z0-9])${escapeRegExp(normalizedTerm)}([^a-z0-9]|$)`, 'i');
+  return wordBoundary.test(normalizedValue);
 }
 
 // 根据文件 frontmatter 的 project_root + last_scanned_commit 判断知识是否可能落后于项目 HEAD。
@@ -2758,7 +3013,7 @@ function escapeRegExp(value) {
 }
 
 function formatSearchOutput(query, results) {
-  const keywords = extractKeywords(query);
+  const keywords = extractQueryKeywords(query);
   const lines = [
     `关键词列表：${keywords.length ? keywords.join(', ') : '无'}`,
     '命中文件：',
@@ -2769,7 +3024,8 @@ function formatSearchOutput(query, results) {
   } else {
     for (const result of results) {
       const pending = result.pending ? '（待确认）' : '';
-      lines.push(`- ${result.repositoryPath}${pending} | 分数：${result.score} | 命中位置：${result.hits.join(', ')}`);
+      const matchedTerms = result.matchedTerms.length ? result.matchedTerms.join(', ') : '无';
+      lines.push(`- ${result.repositoryPath}${pending} | 分数：${result.score} | 匹配词：${matchedTerms} | 命中位置：${result.hits.join(', ')}`);
     }
   }
 
@@ -2777,9 +3033,9 @@ function formatSearchOutput(query, results) {
 }
 
 function formatBeforeTaskOutput(query, results) {
-  const keywords = extractKeywords(query);
-  const required = results.filter((result) => result.score >= 8 && result.relativePath.startsWith('knowledge/'));
-  const related = results.filter((result) => !required.includes(result));
+  const keywords = extractQueryKeywords(query);
+  const required = results.filter((result) => result.mustRead);
+  const related = results.filter((result) => !result.mustRead);
   const lines = [
     `关键词列表：${keywords.length ? keywords.join(', ') : '无'}`,
     '必须阅读项：',
@@ -2808,7 +3064,8 @@ function appendResultLines(lines, results) {
     const pending = result.pending ? '（待确认）' : '';
     const staleTag = result.stale ? ' ⚠可能过期' : '';
     const snippet = result.snippet ? ` | 摘要：${result.snippet}` : '';
-    lines.push(`- ${result.repositoryPath}${pending}${staleTag} | 分数：${result.score} | 命中位置：${result.hits.join(', ')}${snippet}`);
+    const matchedTerms = result.matchedTerms.length ? result.matchedTerms.join(', ') : '无';
+    lines.push(`- ${result.repositoryPath}${pending}${staleTag} | 分数：${result.score} | 匹配词：${matchedTerms} | 判定：${result.mustReadReason} | 命中位置：${result.hits.join(', ')}${snippet}`);
   }
 }
 
@@ -2898,19 +3155,24 @@ function formatDoctorOutput(result) {
 
 // 机读输出：将检索结果整理为结构化对象，便于 OpenCode/Codex 自动化管线消费。
 function resultToJson(command, query, results) {
-  const keywords = extractKeywords(query);
+  const queryModel = buildQueryModel(query);
   return {
     command,
     query,
-    keywords,
+    keywords: queryModel.expandedTerms,
+    queryTerms: queryModel.queryTerms,
+    expandedTerms: queryModel.expandedTerms,
     results: results.map((result) => ({
       repositoryPath: result.repositoryPath,
       relativePath: result.relativePath,
       title: result.title,
       score: result.score,
-      mustRead: result.score >= 8 && result.relativePath.startsWith('knowledge/'),
+      mustRead: result.mustRead,
+      mustReadReason: result.mustReadReason,
       pending: result.pending,
       hits: result.hits,
+      matchedTerms: result.matchedTerms,
+      reasonCodes: result.reasonCodes,
       coverage: result.coverage,
       matched: result.matched,
       total: result.total,
@@ -2951,8 +3213,10 @@ async function main(argv) {
     return 0;
   }
 
+  validateGlobalOptions(command, globalOptions);
+
   if (command === 'search') {
-    const query = globalOptions.args.join(' ').trim();
+    const query = parseFreeTextArguments(globalOptions.args, command);
     const results = await searchKnowledge({
       query,
       knowledgeRoot: globalOptions.knowledgeRoot,
@@ -2966,7 +3230,7 @@ async function main(argv) {
   }
 
   if (command === 'before-task') {
-    const query = globalOptions.args.join(' ').trim();
+    const query = parseFreeTextArguments(globalOptions.args, command);
     const results = await searchKnowledge({
       query,
       knowledgeRoot: globalOptions.knowledgeRoot,
@@ -3024,11 +3288,14 @@ async function main(argv) {
   }
 
   if (command === 'add-rule') {
-    const confirmed = globalOptions.args.includes('--confirmed');
-    const title = globalOptions.args.filter((arg) => arg !== '--confirmed').join(' ').trim();
+    const options = parseCommandOptions(globalOptions.args, {
+      command,
+      flags: { confirmed: 'confirmed' },
+      positional: { property: 'title', join: true },
+    });
     const result = await addRule({
-      title,
-      confirmed,
+      title: options.title,
+      confirmed: options.confirmed,
       knowledgeRoot: globalOptions.knowledgeRoot,
     });
     console.log(`已写入：${result.path}`);
@@ -3036,7 +3303,16 @@ async function main(argv) {
   }
 
   if (command === 'record-fix') {
-    const options = parseOptions(globalOptions.args);
+    const options = parseCommandOptions(globalOptions.args, {
+      command,
+      values: {
+        type: { property: 'type', hint: '<bug|prd|tech>' },
+        target: { property: 'target', hint: '知识文件路径' },
+      },
+      multiValues: {
+        title: { property: 'title', hint: '<title>' },
+      },
+    });
     const result = await recordFix({
       type: options.type,
       title: options.title,
@@ -3048,7 +3324,14 @@ async function main(argv) {
   }
 
   if (command === 'check-stale') {
-    const options = parseOptions(globalOptions.args);
+    const options = parseCommandOptions(globalOptions.args, {
+      command,
+      values: {
+        'project-root': { property: 'projectRoot', hint: '<path>' },
+        'knowledge-file': { property: 'knowledgeFile', hint: '<path>' },
+      },
+      flags: { deep: 'deep' },
+    });
     const result = await checkStale({
       projectRoot: options.projectRoot,
       knowledgeFile: options.knowledgeFile,
@@ -3077,7 +3360,10 @@ async function main(argv) {
   }
 
   if (command === 'promote') {
-    const options = parseOptions(globalOptions.args);
+    const options = parseCommandOptions(globalOptions.args, {
+      command,
+      values: { file: { property: 'file', hint: '<path>' } },
+    });
     const result = await promote({
       file: options.file,
       knowledgeRoot: globalOptions.knowledgeRoot,
@@ -3087,6 +3373,7 @@ async function main(argv) {
   }
 
   if (command === 'list-pending') {
+    parseCommandOptions(globalOptions.args, { command });
     const items = await listPending({
       knowledgeRoot: globalOptions.knowledgeRoot,
     });
@@ -3095,7 +3382,16 @@ async function main(argv) {
   }
 
   if (command === 'refresh-project') {
-    const options = parseOptions(globalOptions.args);
+    const options = parseCommandOptions(globalOptions.args, {
+      command,
+      values: {
+        'project-root': { property: 'projectRoot', hint: '<path>' },
+        'knowledge-file': { property: 'knowledgeFile', hint: '<path>' },
+      },
+      multiValues: {
+        summary: { property: 'summary', hint: '<text>' },
+      },
+    });
     const result = await refreshProject({
       projectRoot: options.projectRoot,
       knowledgeFile: options.knowledgeFile,
@@ -3214,6 +3510,35 @@ function parseGlobalOptions(args) {
   return options;
 }
 
+function validateGlobalOptions(command, globalOptions) {
+  if (!KNOWN_CLI_COMMANDS.has(command)) {
+    return;
+  }
+
+  const optionNames = {
+    json: '--json',
+    knowledgeRoot: '--knowledge-root',
+    repositoryRoot: '--repository-root',
+  };
+  for (const [property, optionName] of Object.entries(optionNames)) {
+    const occurrences = globalOptions.globalOptionOccurrences[property];
+    if (occurrences.length > 1) {
+      throw new Error(`${command} ${optionName} 最多只能提供一次`);
+    }
+    if (occurrences.length > 0 && !GLOBAL_OPTION_SUPPORT[property].has(command)) {
+      throw new Error(`${command} 不支持 ${optionName}`);
+    }
+  }
+}
+
+function parseFreeTextArguments(args, command) {
+  const unknownOption = args.find((arg) => arg.startsWith('--'));
+  if (unknownOption) {
+    throw new Error(`${command} 不接受未知参数：${unknownOption}`);
+  }
+  return args.join(' ').trim();
+}
+
 function parseSyncCommandDocsOptions(globalOptions) {
   const occurrences = globalOptions.globalOptionOccurrences;
   if (occurrences.repositoryRoot.length === 0) {
@@ -3246,63 +3571,70 @@ function parseSyncCommandDocsOptions(globalOptions) {
   return { check, repositoryRoot: globalOptions.repositoryRoot };
 }
 
-function parseOptions(args) {
+function parseCommandOptions(args, {
+  command,
+  values = {},
+  multiValues = {},
+  flags = {},
+  positional,
+} = {}) {
   const options = {};
+  const seen = new Set();
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg.startsWith('--type=')) {
-      options.type = arg.slice('--type='.length);
-    } else if (arg === '--type') {
-      options.type = args[index + 1];
-      index += 1;
-    } else if (arg.startsWith('--title=')) {
-      options.title = arg.slice('--title='.length);
-    } else if (arg === '--title') {
-      const titleParts = [];
-      while (args[index + 1] && !args[index + 1].startsWith('--')) {
-        titleParts.push(args[index + 1]);
-        index += 1;
+    if (!arg.startsWith('--')) {
+      if (!positional) {
+        throw new Error(`${command} 不接受位置参数：${arg || '(empty)'}`);
       }
-      options.title = titleParts.join(' ');
-    } else if (arg.startsWith('--project-root=')) {
-      options.projectRoot = arg.slice('--project-root='.length);
-    } else if (arg === '--project-root') {
-      options.projectRoot = args[index + 1];
-      index += 1;
-    } else if (arg.startsWith('--knowledge-file=')) {
-      options.knowledgeFile = arg.slice('--knowledge-file='.length);
-    } else if (arg === '--knowledge-file') {
-      options.knowledgeFile = args[index + 1];
-      index += 1;
-    } else if (arg.startsWith('--file=')) {
-      options.file = arg.slice('--file='.length);
-    } else if (arg === '--file') {
-      options.file = args[index + 1];
-      index += 1;
-    } else if (arg.startsWith('--target=')) {
-      options.target = arg.slice('--target='.length);
-      if (!options.target) {
-        throw new Error('record-fix --target 需要提供知识文件路径');
+      const valuesForPosition = [arg];
+      if (positional.join) {
+        while (args[index + 1] && !args[index + 1].startsWith('--')) {
+          valuesForPosition.push(args[++index]);
+        }
       }
-    } else if (arg === '--target') {
-      options.target = args[index + 1];
-      if (!options.target || options.target.startsWith('--')) {
-        throw new Error('record-fix --target 需要提供知识文件路径');
+      if (options[positional.property]) {
+        throw new Error(`${command} 的位置参数只能提供一次`);
       }
-      index += 1;
-    } else if (arg.startsWith('--summary=')) {
-      options.summary = arg.slice('--summary='.length);
-    } else if (arg === '--summary') {
-      const summaryParts = [];
-      while (args[index + 1] && !args[index + 1].startsWith('--')) {
-        summaryParts.push(args[index + 1]);
-        index += 1;
-      }
-      options.summary = summaryParts.join(' ');
-    } else if (arg === '--deep') {
-      options.deep = true;
+      options[positional.property] = valuesForPosition.join(' ').trim();
+      continue;
     }
+
+    const assignmentIndex = arg.indexOf('=');
+    const optionName = arg.slice(2, assignmentIndex === -1 ? undefined : assignmentIndex);
+    const assignmentValue = assignmentIndex === -1 ? undefined : arg.slice(assignmentIndex + 1);
+    const definition = values[optionName] ?? multiValues[optionName];
+    const flagProperty = flags[optionName];
+    if (!definition && !flagProperty) {
+      throw new Error(`${command} 不接受未知参数：--${optionName}`);
+    }
+    if (seen.has(optionName)) {
+      throw new Error(`${command} --${optionName} 最多只能提供一次`);
+    }
+    seen.add(optionName);
+
+    if (flagProperty) {
+      if (assignmentValue !== undefined) {
+        throw new Error(`${command} --${optionName} 是布尔标记，不接受赋值`);
+      }
+      options[flagProperty] = true;
+      continue;
+    }
+
+    let value = assignmentValue;
+    if (value === undefined && multiValues[optionName]) {
+      const parts = [];
+      while (args[index + 1] && !args[index + 1].startsWith('--')) {
+        parts.push(args[++index]);
+      }
+      value = parts.join(' ');
+    } else if (value === undefined) {
+      value = args[++index];
+    }
+    if (!value || !value.trim() || value.startsWith('--')) {
+      throw new Error(`${command} --${optionName} 需要提供 ${definition.hint || '非空值'}`);
+    }
+    options[definition.property] = value;
   }
 
   return options;
