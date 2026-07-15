@@ -55,9 +55,17 @@ const cliEntryPath = fileURLToPath(new URL('../bin/agent-knowledge.js', import.m
 const akEntryPath = fileURLToPath(new URL('../bin/ak.ps1', import.meta.url));
 const repositoryRootPath = fileURLToPath(new URL('../../', import.meta.url));
 const commandContractTestPath = fileURLToPath(import.meta.url);
+const cliRuntimeModuleNames = ['command-contract.js', 'knowledge-files.js', 'locks.js'];
 const powerShellExecutable = process.platform === 'win32' ? 'powershell' : 'pwsh';
 const blockBegin = '<!-- BEGIN GENERATED: TEST_BLOCK -->';
 const blockEnd = '<!-- END GENERATED: TEST_BLOCK -->';
+
+async function copyCliRuntimeModules(targetRoot) {
+  await Promise.all(cliRuntimeModuleNames.map((fileName) => copyFile(
+    fileURLToPath(new URL(`../lib/${fileName}`, import.meta.url)),
+    path.join(targetRoot, fileName),
+  )));
+}
 
 test('PowerShell 子进程按运行平台选择可执行文件', async () => {
   const commandContractTestSource = await readFile(commandContractTestPath, 'utf8');
@@ -198,7 +206,7 @@ async function createCommandDocRepository(t, { currentTargets = [], invalidTarge
   ]);
   await Promise.all([
     copyFile(cliEntryPath, path.join(toolBinRoot, 'agent-knowledge.js')),
-    copyFile(fileURLToPath(new URL('../lib/command-contract.js', import.meta.url)), path.join(toolLibRoot, 'command-contract.js')),
+    copyCliRuntimeModules(toolLibRoot),
     writeFile(path.join(toolRoot, 'command-contract.json'), `${JSON.stringify(contract, null, 2)}\n`, 'utf8'),
     writeFile(path.join(toolRoot, 'package.json'), '{"type":"module"}\n', 'utf8'),
   ]);
@@ -458,7 +466,7 @@ async function createMinimalCliTool(t, contractContent) {
   const entryPath = path.join(binRoot, 'agent-knowledge.js');
   await Promise.all([
     copyFile(cliEntryPath, entryPath),
-    copyFile(fileURLToPath(new URL('../lib/command-contract.js', import.meta.url)), path.join(libRoot, 'command-contract.js')),
+    copyCliRuntimeModules(libRoot),
     writeFile(path.join(toolRoot, 'package.json'), '{"type":"module"}\n', 'utf8'),
     writeFile(
       path.join(knowledgeRoot, 'knowledge', 'sample.md'),

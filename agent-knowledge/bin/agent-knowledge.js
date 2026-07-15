@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 
-import { readdir, mkdir, readFile, writeFile, rm, rmdir, stat, lstat, chmod, rename, link, realpath } from 'node:fs/promises';
+import { readdir, mkdir, readFile, rm, rmdir, stat, lstat, chmod, rename, link, realpath } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import process from 'node:process';
-import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -19,6 +18,46 @@ import {
   readUtf8Strict,
   replaceGeneratedBlock,
 } from '../lib/command-contract.js';
+import {
+  appendRefreshRecord,
+  applyTemplateFields,
+  assertConfirmedKnowledgeFile,
+  collectMarkdownFiles,
+  createTemporaryPath,
+  escapeRegExp,
+  hasFrontmatterField,
+  inspectMarkdownCollectionPath,
+  isExistingDirectory,
+  isExistingFileWithinRealRoot,
+  isPathWithinRoot,
+  parseFrontmatter,
+  parseMarkdownFile,
+  prepareKnowledgeDirectory,
+  readDoctorMarkdownFile,
+  readFrontmatterField,
+  readGitHead,
+  readTemplate,
+  resolveKnowledgeContext,
+  resolveKnowledgeMarkdownFile,
+  resolveRealPathIfExists,
+  resolveRootDir,
+  slugify,
+  timestamp,
+  toPosixPath,
+  updateFrontmatterFields,
+  writeFileAtomic,
+  writeUniqueFile,
+} from '../lib/knowledge-files.js';
+import {
+  acquireAdjacentFileLock,
+  FILE_LOCK_RETRY_DELAY_MS,
+  FILE_LOCK_TIMEOUT_MS,
+  isProcessAlive,
+  parseLockContent,
+  RFC4122_UUID_PATTERN,
+} from '../lib/locks.js';
+
+export { writeFileAtomic, writeUniqueFile };
 
 const STOP_WORDS = new Set([
   'a',
@@ -56,20 +95,11 @@ const RESOLVABLE_FIX_CATEGORIES = new Set([
   'prd-corrections',
   'tech-solution-corrections',
 ]);
-const RFC4122_UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
-const RFC4122_UUID_PATTERN = new RegExp(`^${RFC4122_UUID_SOURCE}$`, 'i');
-const LOCK_CONTENT_PATTERN = new RegExp(
-  `^([1-9]\\d*):(${RFC4122_UUID_SOURCE})(?:\\r\\n|\\n)?(?![\\s\\S])`,
-  'i',
-);
 const ADJACENT_LOCK_FILE_PATTERN = /\.md\.lock(?:\.reclaim)?$/;
 const RESOLVE_LOCK_FILE_PATTERN = /^[0-9a-f]{64}\.lock(?:\.reclaim)?$/;
 
 const execFileAsync = promisify(execFile);
-const FILE_LOCK_TIMEOUT_MS = 5000;
-const FILE_LOCK_RETRY_DELAY_MS = 25;
 const MAX_MUST_READ_RESULTS = 5;
-let temporaryFileSequence = 0;
 const ADAPTER_SPECS = Object.freeze([
   Object.freeze({ fileName: 'knowledge.before-task.md' }),
   Object.freeze({ fileName: 'knowledge.record-fix.md' }),
@@ -373,39 +403,6 @@ function classifyMustRead(result) {
     return { mustRead: true, reason: 'high_coverage_body' };
   }
   return { mustRead: false, reason: 'related_low_confidence' };
-}
-
-// 独占创建候选文件，冲突时递增文件名后缀，避免同标题的连续或并发写入互相覆盖。
-export async function writeUniqueFile(filePath, content) {
-  for (let suffix = 1; ; suffix += 1) {
-    const candidatePath = suffix === 1 ? filePath : appendNumericSuffix(filePath, suffix);
-    try {
-      await writeFile(candidatePath, content, { encoding: 'utf8', flag: 'wx' });
-      return candidatePath;
-    } catch (error) {
-      if (error?.code === 'EEXIST') {
-        continue;
-      }
-
-      // writeFile 在创建后写入失败时可能留下不完整文件，只清理本次独占创建的候选路径。
-      await rm(candidatePath, { force: true }).catch(() => {});
-      throw error;
-    }
-  }
-}
-
-// 先在目标同目录完整写入临时文件，再用 rename 原子替换，避免失败时暴露半写内容。
-export async function writeFileAtomic(filePath, content, { renameFile = rename } = {}) {
-  let temporaryPath;
-  try {
-    temporaryPath = await writeUniqueFile(createTemporaryPath(filePath, 'atomic'), content);
-    await renameFile(temporaryPath, filePath);
-  } catch (error) {
-    if (temporaryPath) {
-      await rm(temporaryPath, { force: true }).catch(() => {});
-    }
-    throw error;
-  }
 }
 
 export async function syncAdapters({ repositoryRoot, check = false } = {}) {
@@ -909,149 +906,6 @@ function sortDoctorIssues(issues) {
   });
 }
 
-function isPathWithinRoot(relativePath) {
-  return relativePath !== ''
-    && relativePath !== '..'
-    && !relativePath.startsWith(`..${path.sep}`)
-    && !path.isAbsolute(relativePath);
-}
-
-async function isExistingFileWithinRealRoot(rootPath, filePath) {
-  try {
-    // lexical containment is not sufficient because stat/readFile follow symlinks and Windows junctions.
-    const [resolvedRoot, resolvedFile, stats] = await Promise.all([
-      realpath(rootPath),
-      realpath(filePath),
-      stat(filePath),
-    ]);
-    return isPathWithinRoot(path.relative(resolvedRoot, resolvedFile)) && stats.isFile();
-  } catch {
-    return false;
-  }
-}
-
-async function resolveKnowledgeMarkdownFile(baseDir, file, { command, tree }) {
-  const resolvedBaseDir = path.resolve(baseDir);
-  const requestedPath = path.isAbsolute(file)
-    ? path.resolve(file)
-    : path.resolve(resolvedBaseDir, file);
-  const lexicalRelativePath = path.relative(resolvedBaseDir, requestedPath);
-  if (!isPathWithinRoot(lexicalRelativePath)) {
-    throw new Error(`${command} 知识文件必须位于当前知识库内，检测到路径越界: ${file}`);
-  }
-
-  const relativePath = toPosixPath(lexicalRelativePath);
-  if (!relativePath.startsWith(`${tree}/`)) {
-    throw new Error(`${command} 只接受 ${tree}/ 下的知识文件: ${relativePath}`);
-  }
-  if (path.extname(requestedPath).toLowerCase() !== '.md') {
-    throw new Error(`${command} 知识文件必须是 Markdown: ${relativePath}`);
-  }
-
-  let entryStats;
-  let realBaseDir;
-  let realFilePath;
-  let fileStats;
-  try {
-    [entryStats, realBaseDir, realFilePath, fileStats] = await Promise.all([
-      lstat(requestedPath),
-      realpath(resolvedBaseDir),
-      realpath(requestedPath),
-      stat(requestedPath),
-    ]);
-  } catch {
-    throw new Error(`${command} 知识文件不存在或不是普通文件: ${relativePath}`);
-  }
-  if (entryStats.isSymbolicLink()) {
-    throw new Error(`${command} 不接受文件符号链接: ${relativePath}`);
-  }
-  if (!fileStats.isFile()) {
-    throw new Error(`${command} 知识文件不存在或不是普通文件: ${relativePath}`);
-  }
-  if (!isPathWithinRoot(path.relative(realBaseDir, realFilePath))) {
-    throw new Error(`${command} 知识文件真实路径越出当前知识库: ${relativePath}`);
-  }
-
-  return {
-    filePath: requestedPath,
-    realFilePath,
-    relativePath,
-  };
-}
-
-function assertConfirmedKnowledgeFile(command, relativePath, raw) {
-  const status = readFrontmatterField(parseFrontmatter(raw).frontmatter, 'status');
-  if (status !== 'confirmed') {
-    throw new Error(`${command} 只接受 status: confirmed 的 knowledge/ 文件: ${relativePath}`);
-  }
-}
-
-async function prepareKnowledgeDirectory(baseDir, dirPath, command) {
-  const resolvedBaseDir = path.resolve(baseDir);
-  const resolvedDirPath = path.resolve(dirPath);
-  const relativeDirPath = path.relative(resolvedBaseDir, resolvedDirPath);
-  if (!isPathWithinRoot(relativeDirPath)) {
-    throw new Error(`${command} 目标目录必须位于当前知识库内: ${toPosixPath(relativeDirPath)}`);
-  }
-
-  // 逐级检查后再创建，避免 recursive mkdir 先穿过外部 junction/symlink 产生越界副作用。
-  let currentPath = resolvedBaseDir;
-  for (const segment of relativeDirPath.split(path.sep)) {
-    currentPath = path.join(currentPath, segment);
-    let currentStats;
-    try {
-      currentStats = await lstat(currentPath);
-    } catch (error) {
-      if (error?.code !== 'ENOENT') {
-        throw error;
-      }
-      try {
-        await mkdir(currentPath);
-      } catch (mkdirError) {
-        if (mkdirError?.code !== 'EEXIST') {
-          throw mkdirError;
-        }
-      }
-      currentStats = await lstat(currentPath);
-    }
-    if (currentStats.isSymbolicLink()) {
-      throw new Error(`${command} 目标目录不接受目录链接: ${toPosixPath(path.relative(resolvedBaseDir, currentPath))}`);
-    }
-    if (!currentStats.isDirectory()) {
-      throw new Error(`${command} 目标路径不是目录: ${toPosixPath(path.relative(resolvedBaseDir, currentPath))}`);
-    }
-  }
-
-  const [realBaseDir, realDirPath] = await Promise.all([
-    realpath(resolvedBaseDir),
-    realpath(resolvedDirPath),
-  ]);
-  if (!isPathWithinRoot(path.relative(realBaseDir, realDirPath))) {
-    throw new Error(`${command} 目标目录真实路径越出当前知识库: ${toPosixPath(relativeDirPath)}`);
-  }
-}
-
-async function isExistingDirectory(dirPath) {
-  try {
-    return (await stat(dirPath)).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function appendNumericSuffix(filePath, suffix) {
-  const extension = path.extname(filePath);
-  return `${filePath.slice(0, -extension.length)}-${suffix}${extension}`;
-}
-
-function createTemporaryPath(filePath, purpose) {
-  temporaryFileSequence += 1;
-  return path.join(
-    path.dirname(filePath),
-    `.${path.basename(filePath)}.${purpose}-${process.pid}-${Date.now()}-${temporaryFileSequence}.tmp`,
-  );
-}
-
 export async function addRule({ rootDir, knowledgeRoot, title, confirmed = false } = {}) {
   if (!title) {
     throw new Error('addRule requires a title');
@@ -1295,122 +1149,6 @@ export async function refreshProject({
     };
   } finally {
     await releaseLock();
-  }
-}
-
-async function acquireAdjacentFileLock(filePath, { timeoutMs, retryDelayMs }) {
-  const lockPath = `${filePath}.lock`;
-  const reclaimPath = `${lockPath}.reclaim`;
-  const startedAt = Date.now();
-  const lockContent = createLockContent();
-
-  for (;;) {
-    const reclaimContent = createLockContent();
-    if (await tryCreateLock(reclaimPath, reclaimContent)) {
-      let acquired = false;
-      try {
-        acquired = await tryCreateLock(lockPath, lockContent);
-        if (!acquired && await removeLockOwnedByDeadProcess(lockPath)) {
-          acquired = await tryCreateLock(lockPath, lockContent);
-        }
-      } finally {
-        await releaseOwnedLock(reclaimPath, reclaimContent);
-      }
-
-      if (acquired) {
-        return async () => releaseOwnedLock(lockPath, lockContent);
-      }
-    }
-
-    if (Date.now() - startedAt >= timeoutMs) {
-      const error = new Error(`等待文件锁超时（${timeoutMs}ms）: ${lockPath}`);
-      error.code = 'LOCK_TIMEOUT';
-      throw error;
-    }
-
-    await delay(retryDelayMs);
-  }
-}
-
-function createLockContent() {
-  return `${process.pid}:${randomUUID()}\n`;
-}
-
-function parseLockContent(raw) {
-  const match = String(raw).match(LOCK_CONTENT_PATTERN);
-  if (!match) {
-    return null;
-  }
-
-  const ownerPid = Number(match[1]);
-  if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) {
-    return null;
-  }
-
-  return { ownerPid };
-}
-
-async function tryCreateLock(lockPath, content) {
-  try {
-    await writeFile(lockPath, content, { encoding: 'utf8', flag: 'wx' });
-    return true;
-  } catch (error) {
-    if (error?.code === 'EEXIST') {
-      return false;
-    }
-    throw error;
-  }
-}
-
-async function releaseOwnedLock(lockPath, content) {
-  let currentContent;
-  try {
-    currentContent = await readFile(lockPath, 'utf8');
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
-      return;
-    }
-    throw error;
-  }
-
-  // token 不匹配说明锁已不属于当前调用，绝不能删除后继持有者的锁。
-  if (currentContent === content) {
-    await rm(lockPath);
-  }
-}
-
-async function removeLockOwnedByDeadProcess(lockPath) {
-  let raw;
-  try {
-    raw = await readFile(lockPath, 'utf8');
-  } catch (error) {
-    return error?.code === 'ENOENT';
-  }
-
-  const lock = parseLockContent(raw);
-  if (!lock) {
-    return false;
-  }
-
-  if (isProcessAlive(lock.ownerPid)) {
-    return false;
-  }
-
-  // 调用方持有 reclaim guard，重新读取并确认 PID 已退出后才能删除主锁，避免 ABA 误删新锁。
-  try {
-    await rm(lockPath);
-    return true;
-  } catch (error) {
-    return error?.code === 'ENOENT';
-  }
-}
-
-function isProcessAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code !== 'ESRCH';
   }
 }
 
@@ -2558,254 +2296,6 @@ async function collectPendingUnder(dir, baseDir, items) {
   }
 }
 
-function resolveKnowledgeContext({ rootDir, knowledgeRoot } = {}) {
-  const explicitKnowledgeRoot = knowledgeRoot || (!rootDir ? process.env.AGENT_KNOWLEDGE_ROOT : '');
-
-  if (explicitKnowledgeRoot) {
-    return {
-      baseDir: path.resolve(explicitKnowledgeRoot),
-      repositoryPrefix: '',
-    };
-  }
-
-  const resolvedRoot = resolveRootDir(rootDir);
-  return {
-    baseDir: path.join(resolvedRoot, 'agent-knowledge'),
-    repositoryPrefix: 'agent-knowledge',
-  };
-}
-
-function resolveRootDir(rootDir) {
-  if (rootDir) {
-    return path.resolve(rootDir);
-  }
-
-  const cwdRoot = resolveRootDirFromDirectory(process.cwd());
-  if (cwdRoot) {
-    return cwdRoot;
-  }
-
-  const moduleRoot = resolveRootDirFromModulePath();
-  if (moduleRoot) {
-    return moduleRoot;
-  }
-
-  throw new Error('无法定位包含 agent-knowledge 的仓库根目录，请在仓库根或 agent-knowledge 目录运行。');
-}
-
-function resolveRootDirFromDirectory(dir) {
-  if (existsSync(path.join(dir, 'agent-knowledge', 'package.json'))) {
-    return dir;
-  }
-
-  if (path.basename(dir) === 'agent-knowledge' && existsSync(path.join(dir, 'package.json'))) {
-    return path.dirname(dir);
-  }
-
-  return null;
-}
-
-function resolveRootDirFromModulePath() {
-  const agentKnowledgeDir = path.dirname(path.dirname(modulePath));
-  if (path.basename(agentKnowledgeDir) !== 'agent-knowledge') {
-    return null;
-  }
-
-  if (!existsSync(path.join(agentKnowledgeDir, 'package.json'))) {
-    return null;
-  }
-
-  return path.dirname(agentKnowledgeDir);
-}
-
-async function collectMarkdownFiles(agentKnowledgeDir) {
-  const roots = [
-    path.join(agentKnowledgeDir, 'knowledge'),
-    path.join(agentKnowledgeDir, 'inbox'),
-  ];
-  const files = [];
-  const resolvedKnowledgeRoot = await resolveRealPathIfExists(agentKnowledgeDir);
-  if (!resolvedKnowledgeRoot) {
-    return files;
-  }
-
-  for (const root of roots) {
-    await collectMarkdownFilesUnder(
-      root,
-      files,
-      agentKnowledgeDir,
-      resolvedKnowledgeRoot,
-    );
-  }
-
-  return files;
-}
-
-async function collectMarkdownFilesUnder(dir, files, baseDir, resolvedBaseDir) {
-  const directoryInfo = await inspectMarkdownCollectionPath(baseDir, resolvedBaseDir, dir);
-  if (!directoryInfo?.stats.isDirectory()) {
-    return;
-  }
-
-  const entries = await readdir(dir);
-  for (const entry of entries) {
-    const entryPath = path.join(dir, entry);
-    const entryInfo = await inspectMarkdownCollectionPath(baseDir, resolvedBaseDir, entryPath);
-    if (entryInfo?.stats.isDirectory()) {
-      await collectMarkdownFilesUnder(entryPath, files, baseDir, resolvedBaseDir);
-    } else if (entryInfo?.stats.isFile() && entry.endsWith('.md')) {
-      files.push(entryPath);
-    }
-  }
-}
-
-async function resolveRealPathIfExists(filePath) {
-  try {
-    return await realpath(filePath);
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
-      return null;
-    }
-    throw error;
-  }
-}
-
-async function inspectMarkdownCollectionPath(baseDir, resolvedBaseDir, entryPath) {
-  if (!resolvedBaseDir || !isPathWithinRoot(path.relative(baseDir, entryPath))) {
-    return null;
-  }
-
-  try {
-    const stats = await lstat(entryPath);
-    if (stats.isSymbolicLink()) {
-      return null;
-    }
-    const resolvedEntry = await realpath(entryPath);
-    if (!isPathWithinRoot(path.relative(resolvedBaseDir, resolvedEntry))) {
-      return null;
-    }
-    return { stats, resolvedEntry };
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
-      return null;
-    }
-    throw error;
-  }
-}
-
-async function readDoctorMarkdownFile(baseDir, resolvedBaseDir, filePath) {
-  if (!filePath.endsWith('.md')) {
-    return null;
-  }
-  const fileInfo = await inspectMarkdownCollectionPath(baseDir, resolvedBaseDir, filePath);
-  if (!fileInfo?.stats.isFile()) {
-    return null;
-  }
-
-  // 读取前复核能拒绝既存或已完成的链接替换；零依赖 Node 无法封闭复核与 readFile syscall 之间的恶意竞态。
-  try {
-    return await readFile(filePath, 'utf8');
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
-      return null;
-    }
-    throw error;
-  }
-}
-
-async function parseMarkdownFile(knowledgeContext, filePath) {
-  const raw = await readFile(filePath, 'utf8');
-  const parsedFrontmatter = parseFrontmatter(raw);
-  const heading = parsedFrontmatter.body.match(/^#\s+(.+)$/m);
-  const relativePath = toPosixPath(path.relative(knowledgeContext.baseDir, filePath));
-  const repositoryPath = knowledgeContext.repositoryPrefix
-    ? toPosixPath(path.join(knowledgeContext.repositoryPrefix, relativePath))
-    : relativePath;
-
-  return {
-    fileName: path.basename(filePath),
-    relativePath,
-    repositoryPath,
-    frontmatter: parsedFrontmatter.frontmatter,
-    title: heading?.[1]?.trim() ?? '',
-    body: parsedFrontmatter.body,
-  };
-}
-
-function parseFrontmatter(raw) {
-  const normalized = raw.replace(/\r\n/g, '\n');
-  if (!normalized.startsWith('---\n')) {
-    return {
-      frontmatter: '',
-      body: raw,
-    };
-  }
-
-  const closingIndex = normalized.indexOf('\n---\n', 4);
-  if (closingIndex === -1) {
-    return {
-      frontmatter: '',
-      body: raw,
-    };
-  }
-
-  return {
-    frontmatter: normalized.slice(4, closingIndex),
-    body: normalized.slice(closingIndex + 5),
-  };
-}
-
-function readFrontmatterField(frontmatter, field) {
-  const escapedField = escapeRegExp(field);
-  const match = frontmatter.match(new RegExp(`^${escapedField}:\\s*(.+?)\\s*$`, 'm'));
-  if (!match) {
-    return '';
-  }
-
-  return match[1].replace(/^['"]|['"]$/g, '').trim();
-}
-
-function hasFrontmatterField(frontmatter, field) {
-  return new RegExp(`^${escapeRegExp(field)}:\\s*.*$`, 'm').test(frontmatter);
-}
-
-function updateFrontmatterFields(frontmatter, fields) {
-  let nextFrontmatter = frontmatter.trimEnd();
-
-  for (const [field, value] of Object.entries(fields)) {
-    const escapedField = escapeRegExp(field);
-    const line = `${field}: ${value}`;
-    const pattern = new RegExp(`^${escapedField}:.*$`, 'm');
-    if (pattern.test(nextFrontmatter)) {
-      nextFrontmatter = nextFrontmatter.replace(pattern, line);
-    } else {
-      nextFrontmatter = nextFrontmatter ? `${nextFrontmatter}\n${line}` : line;
-    }
-  }
-
-  return nextFrontmatter;
-}
-
-function appendRefreshRecord(body, { date, commit, summary } = {}) {
-  const normalizedBody = body.startsWith('\n') ? body : `\n${body}`;
-  const cleanBody = normalizedBody.endsWith('\n') ? normalizedBody : `${normalizedBody}\n`;
-  const cleanSummary = summary?.trim() || '已根据项目当前 HEAD 确认知识条目。';
-  const entry = `- ${date}: refreshed against ${commit.slice(0, 12)}. ${cleanSummary}`;
-
-  if (cleanBody.includes('\n## 刷新记录\n')) {
-    return `${cleanBody.trimEnd()}\n${entry}\n`;
-  }
-
-  return `${cleanBody.trimEnd()}\n\n## 刷新记录\n\n${entry}\n`;
-}
-
-async function readGitHead(projectRoot) {
-  const { stdout } = await execFileAsync('git', ['-C', path.resolve(projectRoot), 'rev-parse', 'HEAD'], {
-    encoding: 'utf8',
-  });
-  return stdout.trim();
-}
-
 function scoreMarkdownFile(parsed, queryModel) {
   let score = 0;
   const hitSet = new Set();
@@ -2952,64 +2442,6 @@ function buildSnippet(parsed, keywords) {
   }
 
   return '';
-}
-
-async function readTemplate(agentKnowledgeDir, templateName) {
-  const templatePath = path.join(agentKnowledgeDir, 'templates', templateName);
-  if (existsSync(templatePath)) {
-    return readFile(templatePath, 'utf8');
-  }
-
-  // Tests pass an empty temporary rootDir; keep writes there but read packaged templates.
-  return readFile(path.join(path.dirname(modulePath), '..', 'templates', templateName), 'utf8');
-}
-
-function applyTemplateFields(template, fields) {
-  let content = template;
-
-  // Templates use simple frontmatter fields, so keep replacement textual and dependency-free.
-  for (const [field, value] of Object.entries(fields)) {
-    content = content.replace(new RegExp(`^${escapeRegExp(field)}:.*$`, 'm'), `${field}: ${value}`);
-  }
-
-  return content.replaceAll('{{title}}', fields.title);
-}
-
-function slugify(title) {
-  return title
-    .toLowerCase()
-    .match(/[a-z0-9]+/g)
-    ?.join('-') ?? '';
-}
-
-function timestamp(now = new Date()) {
-  const parts = new Intl.DateTimeFormat('sv-SE', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).formatToParts(now);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  const date = `${values.year}${values.month}${values.day}`;
-  const time = `${values.hour}${values.minute}${values.second}`;
-
-  return {
-    date,
-    compact: `${date}-${time}`,
-    isoDate: `${values.year}-${values.month}-${values.day}`,
-  };
-}
-
-function toPosixPath(filePath) {
-  return filePath.split(path.sep).join('/');
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function formatSearchOutput(query, results) {
