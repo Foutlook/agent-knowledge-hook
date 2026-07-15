@@ -321,26 +321,6 @@ export async function inspectMarkdownCollectionPath(baseDir, resolvedBaseDir, en
   }
 }
 
-export async function readDoctorMarkdownFile(baseDir, resolvedBaseDir, filePath) {
-  if (!filePath.endsWith('.md')) {
-    return null;
-  }
-  const fileInfo = await inspectMarkdownCollectionPath(baseDir, resolvedBaseDir, filePath);
-  if (!fileInfo?.stats.isFile()) {
-    return null;
-  }
-
-  // 读取前复核能拒绝既存或已完成的链接替换；零依赖 Node 无法封闭复核与 readFile syscall 之间的恶意竞态。
-  try {
-    return await readFile(filePath, 'utf8');
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
-      return null;
-    }
-    throw error;
-  }
-}
-
 export async function parseMarkdownFile(knowledgeContext, filePath) {
   const raw = await readFile(filePath, 'utf8');
   const parsedFrontmatter = parseFrontmatter(raw);

@@ -57,6 +57,7 @@ const repositoryRootPath = fileURLToPath(new URL('../../', import.meta.url));
 const commandContractTestPath = fileURLToPath(import.meta.url);
 const cliRuntimeModuleNames = [
   'command-contract.js',
+  'doctor.js',
   'knowledge-files.js',
   'lifecycle.js',
   'locks.js',
