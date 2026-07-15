@@ -443,7 +443,18 @@ AI 工具 / Agent
 
 ## 目录说明
 
-- `bin/`：跨工具命令入口。
+- `bin/`：跨平台包装器和保持程序化导出兼容的薄命令入口。
+- `lib/`：按职责拆分的核心模块：
+  - `cli.js`：命令路由、参数解析、文本 / JSON 输出和退出码。
+  - `command-contract.js`：CLI 与 PowerShell 短命令共享的命令契约和文档渲染。
+  - `knowledge-files.js`：知识根解析、Markdown/frontmatter、真实路径和原子文件操作。
+  - `locks.js`：相邻文件锁、锁内容解析和 owner 判断。
+  - `retrieval.js`：查询词组、同义词、评分、mustRead 分类、摘要和检索时过期提示。
+  - `lifecycle.js`：规则、纠偏、过期检查、刷新、晋升和待确认清单生命周期。
+  - `targeted-fix-contract.js`：targeted fix 分类的共享契约。
+  - `resolve-fix.js`：targeted fix 校验、关闭、恢复和审计工件。
+  - `doctor.js`：知识、引用、证据、锁和适配器健康检查。
+  - `repository-maintenance.js`：命令文档与适配器同步及漂移检查。
 - `templates/`：规则、纠错记录和业务知识模板。
 - `knowledge/rules/`：已确认的工程或业务规则。
 - `knowledge/pitfalls/`：已确认的历史坑。
@@ -459,7 +470,7 @@ AI 工具 / Agent
 - `work/`：`resolve-fix` 的锁和中断恢复状态，不参与检索或待确认清单。
 - `tool-adapters/`：不同 AI 工具的接入说明。
 - `help/`：短命令的中文详细帮助文本。
-- `tests/`：命令和知识库行为测试。
+- `tests/`：按 `retrieval.test.js`、`lifecycle.test.js`、`resolve-fix.test.js`、`doctor.test.js`、`repository-maintenance.test.js`、`cli.test.js` 六个功能域拆分的测试；`command-contract.test.js` 独立验证命令契约，`test-helpers.js` 提供跨域共享夹具。
 
 ## 跨平台入口
 

@@ -238,6 +238,19 @@ macOS / Linux Shell 包装器：
 ## 项目结构
 
 - `agent-knowledge/`：核心 CLI、模板、知识库和测试。
+- `agent-knowledge/bin/`：跨平台包装器和保持程序化导出兼容的薄命令入口。
+- `agent-knowledge/lib/`：按职责拆分的核心模块：
+  - `cli.js`：命令路由、参数解析、文本 / JSON 输出和退出码。
+  - `command-contract.js`：CLI 与 PowerShell 短命令共享的命令契约和文档渲染。
+  - `knowledge-files.js`：知识根解析、Markdown/frontmatter、真实路径和原子文件操作。
+  - `locks.js`：相邻文件锁、锁内容解析和 owner 判断。
+  - `retrieval.js`：查询词组、同义词、评分、mustRead 分类、摘要和检索时过期提示。
+  - `lifecycle.js`：规则、纠偏、过期检查、刷新、晋升和待确认清单生命周期。
+  - `targeted-fix-contract.js`：targeted fix 分类的共享契约。
+  - `resolve-fix.js`：targeted fix 校验、关闭、恢复和审计工件。
+  - `doctor.js`：知识、引用、证据、锁和适配器健康检查。
+  - `repository-maintenance.js`：命令文档与适配器同步及漂移检查。
+- `agent-knowledge/tests/`：按 retrieval、lifecycle、resolve-fix、doctor、repository-maintenance、cli 六个功能域拆分的测试，以及共享 helper 和独立的 command-contract 契约测试。
 - `agent-knowledge/knowledge/`：脱敏示例知识；真实团队知识建议放入私有知识库。
 - `agent-knowledge/inbox/`：脱敏示例缓冲区；真实纠错记录建议写入私有知识库的 `inbox/`。
 - `agent-knowledge/templates/`：知识模板和 OpenCode 命令适配器的唯一模板来源。
