@@ -366,6 +366,50 @@ test('mustRead v2 requires a high-coverage title or frontmatter match', async ()
   assert.ok(result.reasonCodes.includes('frontmatter'));
 });
 
+test('mustRead v2 demotes candidates far below the strongest score', async () => {
+  const rootDir = await createTempRoot();
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/alpha-beta-gamma-delta.md',
+    [
+      '---',
+      'title: alpha beta gamma delta',
+      'tags: [alpha, beta, gamma, delta]',
+      'status: confirmed',
+      '---',
+      '',
+      '# alpha beta gamma delta',
+      '',
+      'alpha beta gamma delta',
+      '',
+    ].join('\n'),
+  );
+  await writeKnowledgeFile(
+    rootDir,
+    'knowledge/rules/weak.md',
+    [
+      '---',
+      'title: alpha beta',
+      'status: confirmed',
+      '---',
+      '',
+      '# alpha beta',
+      '',
+      'alpha beta',
+      '',
+    ].join('\n'),
+  );
+
+  const results = await searchKnowledge({ rootDir, query: 'alpha beta gamma delta' });
+  const strongest = results.find((result) => result.relativePath.endsWith('alpha-beta-gamma-delta.md'));
+  const weak = results.find((result) => result.relativePath.endsWith('weak.md'));
+
+  assert.ok(weak.score < strongest.score * 0.6, 'fixture must stay below the relative score gate');
+  assert.equal(strongest.mustRead, true);
+  assert.equal(weak.mustRead, false);
+  assert.equal(weak.mustReadReason, 'related_score_gap');
+});
+
 test('mustRead v2 caps required knowledge at five results', async () => {
   const rootDir = await createTempRoot();
   for (let index = 1; index <= 7; index += 1) {

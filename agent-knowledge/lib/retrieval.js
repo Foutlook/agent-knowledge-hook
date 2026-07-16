@@ -37,6 +37,7 @@ const STOP_WORDS = new Set([
   'with',
 ]);
 const MAX_MUST_READ_RESULTS = 5;
+const MIN_MUST_READ_SCORE_RATIO = 0.6;
 const modulePath = fileURLToPath(import.meta.url);
 
 // --- 同义词 / 别名映射（增强召回） ---
@@ -262,12 +263,19 @@ export async function searchKnowledge({ rootDir, knowledgeRoot, query } = {}) {
 }
 
 function applyMustReadClassification(results) {
+  const strongestScore = results.reduce((maximum, result) => Math.max(maximum, result.score), 0);
   let requiredCount = 0;
   for (const result of results) {
     const classification = classifyMustRead(result);
     if (!classification.mustRead) {
       result.mustRead = false;
       result.mustReadReason = classification.reason;
+      continue;
+    }
+    // 必读会强制加载正文；与本次最强证据差距过大的候选只保留为相关项，避免泛化命中挤占上下文。
+    if (result.score < strongestScore * MIN_MUST_READ_SCORE_RATIO) {
+      result.mustRead = false;
+      result.mustReadReason = 'related_score_gap';
       continue;
     }
     if (requiredCount >= MAX_MUST_READ_RESULTS) {
