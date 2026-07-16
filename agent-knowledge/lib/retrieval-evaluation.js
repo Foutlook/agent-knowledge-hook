@@ -1,4 +1,17 @@
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+
+import { collectMarkdownFiles, writeFileAtomic } from './knowledge-files.js';
+import { searchKnowledge } from './retrieval.js';
+
 const LABEL_PATH_PATTERN = /^(knowledge|inbox)\/[A-Za-z0-9._\-/\p{Script=Han}]+\.md$/u;
+const METRIC_RULES = [
+  { name: 'mustReadPrecision', direction: 'higher' },
+  { name: 'requiredRecallAt5', direction: 'higher' },
+  { name: 'falseMustReadCount', direction: 'lower' },
+  { name: 'top1HitRate', direction: 'higher' },
+];
 
 function assertPlainObject(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -125,4 +138,203 @@ export function calculateEvaluationMetrics(queryEvaluations) {
     requiredCount,
     positiveQueryCount,
   };
+}
+
+export async function loadEvaluationSuite(filePath) {
+  const raw = await readFile(filePath, 'utf8');
+  const suite = validateEvaluationSuite(JSON.parse(raw));
+  return {
+    suite,
+    suiteHash: createHash('sha256').update(raw, 'utf8').digest('hex'),
+  };
+}
+
+async function inspectKnowledgeCorpus(knowledgeRoot) {
+  const resolvedRoot = path.resolve(knowledgeRoot);
+  const files = await collectMarkdownFiles(resolvedRoot);
+  const entries = [];
+  for (const filePath of files) {
+    entries.push({
+      path: path.relative(resolvedRoot, filePath).split(path.sep).join('/'),
+      content: await readFile(filePath),
+    });
+  }
+  entries.sort((left, right) => left.path.localeCompare(right.path));
+
+  const hash = createHash('sha256');
+  for (const entry of entries) {
+    // 路径和内容都进入指纹，防止重命名与正文变化被当成同一份评测语料。
+    hash.update(entry.path, 'utf8');
+    hash.update('\0');
+    hash.update(entry.content);
+    hash.update('\0');
+  }
+  return {
+    fingerprint: hash.digest('hex'),
+    paths: entries.map((entry) => entry.path),
+  };
+}
+
+function toEvaluationResult(result) {
+  const resultPath = result.path ?? result.relativePath;
+  if (typeof resultPath !== 'string' || resultPath === '') {
+    throw new Error('检索结果缺少 path');
+  }
+  return {
+    path: resultPath,
+    mustRead: result.mustRead === true,
+    mustReadReason: result.mustReadReason ?? '',
+    score: result.score ?? 0,
+    coverage: result.coverage ?? 0,
+    matchedTerms: result.matchedTerms ?? [],
+    reasonCodes: result.reasonCodes ?? [],
+    hits: result.hits ?? [],
+  };
+}
+
+export async function runRetrievalEvaluation({
+  suite,
+  suiteHash,
+  knowledgeRoot,
+  search = searchKnowledge,
+}) {
+  const resolvedKnowledgeRoot = path.resolve(knowledgeRoot);
+  const corpus = await inspectKnowledgeCorpus(resolvedKnowledgeRoot);
+  const corpusPaths = new Set(corpus.paths);
+  for (const query of suite.queries) {
+    for (const labelPath of [...query.required, ...query.related]) {
+      if (!corpusPaths.has(labelPath)) {
+        throw new Error(`评测查询 ${query.id} 的标注路径不存在: ${labelPath}`);
+      }
+    }
+  }
+
+  const queries = [];
+  for (const query of suite.queries) {
+    const results = (await search({
+      knowledgeRoot: resolvedKnowledgeRoot,
+      query: query.query,
+    })).map(toEvaluationResult);
+    const required = new Set(query.required);
+    const mustReadPaths = results
+      .filter((result) => result.mustRead)
+      .slice(0, 5)
+      .map((result) => result.path);
+    const requiredMustRead = mustReadPaths.filter((file) => required.has(file));
+    queries.push({
+      id: query.id,
+      category: query.category,
+      query: query.query,
+      required: query.required,
+      related: query.related,
+      results,
+      requiredMustRead,
+      falseMustRead: mustReadPaths.filter((file) => !required.has(file)),
+      requiredMissingFromMustRead: query.required.filter((file) => !requiredMustRead.includes(file)),
+      top1Hit: query.required.length > 0
+        && results.length > 0
+        && required.has(results[0].path),
+    });
+  }
+
+  return {
+    schemaVersion: 1,
+    suiteName: suite.name,
+    suiteHash,
+    knowledgeFingerprint: corpus.fingerprint,
+    corpusFileCount: corpus.paths.length,
+    metrics: calculateEvaluationMetrics(queries),
+    queries,
+  };
+}
+
+function getComparableQueryIds(report) {
+  if (!Array.isArray(report?.queries)) {
+    throw new Error('无法比较评测报告: queries 必须是数组');
+  }
+  return report.queries.map((query) => query?.id);
+}
+
+function assertCompatibleReports(baseline, candidate) {
+  const baselineIds = getComparableQueryIds(baseline);
+  const candidateIds = getComparableQueryIds(candidate);
+  const incompatibility = [
+    baseline?.schemaVersion !== candidate?.schemaVersion && 'schemaVersion 不一致',
+    baseline?.suiteHash !== candidate?.suiteHash && 'suiteHash 不一致',
+    baseline?.knowledgeFingerprint !== candidate?.knowledgeFingerprint && 'knowledgeFingerprint 不一致',
+    JSON.stringify(baselineIds) !== JSON.stringify(candidateIds) && '查询集合或顺序不一致',
+  ].find(Boolean);
+  if (incompatibility) {
+    // 套件或知识正文变化时，指标变化无法再单独归因于检索算法，因此禁止直接比较。
+    throw new Error(`无法比较评测报告: ${incompatibility}`);
+  }
+}
+
+function metricValue(value) {
+  // 没有分母的比率以 null 落盘；比较时按零处理，使后续真实命中能被识别为提升。
+  return value === null ? 0 : value;
+}
+
+export function compareEvaluationReports(baseline, candidate) {
+  assertCompatibleReports(baseline, candidate);
+  const metricDeltas = {};
+  const regressions = [];
+  for (const rule of METRIC_RULES) {
+    const baselineMetric = baseline.metrics?.[rule.name];
+    const candidateMetric = candidate.metrics?.[rule.name];
+    const baselineValue = metricValue(baselineMetric);
+    const candidateValue = metricValue(candidateMetric);
+    if (!Number.isFinite(baselineValue) || !Number.isFinite(candidateValue)) {
+      throw new Error(`无法比较评测报告: 指标 ${rule.name} 不是有效数值`);
+    }
+    metricDeltas[rule.name] = candidateValue - baselineValue;
+    const regressed = rule.direction === 'higher'
+      ? candidateValue < baselineValue
+      : candidateValue > baselineValue;
+    if (regressed) {
+      regressions.push({
+        metric: rule.name,
+        baseline: baselineMetric,
+        candidate: candidateMetric,
+      });
+    }
+  }
+
+  const queryChanges = [];
+  for (let index = 0; index < baseline.queries.length; index += 1) {
+    const baselineQuery = baseline.queries[index];
+    const candidateQuery = candidate.queries[index];
+    const baselineFalseMustRead = baselineQuery.falseMustRead ?? [];
+    const candidateFalseMustRead = candidateQuery.falseMustRead ?? [];
+    const baselineRequiredMustRead = baselineQuery.requiredMustRead ?? [];
+    const candidateRequiredMustRead = candidateQuery.requiredMustRead ?? [];
+    const newFalseMustRead = candidateFalseMustRead
+      .filter((file) => !baselineFalseMustRead.includes(file));
+    const lostRequiredMustRead = baselineRequiredMustRead
+      .filter((file) => !candidateRequiredMustRead.includes(file));
+    const baselineTop1 = baselineQuery.results?.[0]?.path ?? null;
+    const candidateTop1 = candidateQuery.results?.[0]?.path ?? null;
+    if (newFalseMustRead.length > 0
+      || lostRequiredMustRead.length > 0
+      || baselineTop1 !== candidateTop1) {
+      queryChanges.push({
+        id: baselineQuery.id,
+        newFalseMustRead,
+        lostRequiredMustRead,
+        baselineTop1,
+        candidateTop1,
+      });
+    }
+  }
+
+  return {
+    passed: regressions.length === 0,
+    metricDeltas,
+    regressions,
+    queryChanges,
+  };
+}
+
+export async function writeEvaluationReport(filePath, report) {
+  await writeFileAtomic(path.resolve(filePath), `${JSON.stringify(report, null, 2)}\n`);
 }
