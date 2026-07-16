@@ -401,7 +401,7 @@ node agent-knowledge/bin/agent-knowledge.js eval-retrieval `
 - 不增加 `agent-knowledge` 正式命令、`ak.ps1` 短命令或 `command-contract.json` 条目；通过 `npm run eval:retrieval -- <参数>` 调用独立脚本。
 - 私有套件只保存查询 ID、分类、查询文本、`required` 和可选 `related` 路径，不手工维护穷尽式 `irrelevant` 标注和逐文件 SHA-256。
 - 运行时自动计算套件摘要和当前 `knowledge/`、`inbox/` Markdown 语料指纹。候选报告只有在两个摘要都与基线一致时才允许比较；首期不复制隔离语料。
-- 首期只计算必读精确率、Required Recall@5、错误必读数量和 Top 1 命中率四个指标。
+- 首期只计算必读精确率、Required Recall@5、错误必读数量和 Top 1 命中率四个指标。其中 Required Recall@5 明确定义为“标注 `required` 且进入最多五项 `mustRead` 集合”的召回率，避免正确文件仍在普通结果前列、但已被错误降级为“可能相关”时漏报回归。
 - 首期比较门禁只要求四个指标均不退化，并输出新增错误必读、掉出 Top 5 的 required 和 Top 1 变化。
 - 不实现 MRR、nDCG、章节命中、重复运行确定性、延迟门禁、语料隔离复制和正式基线晋升流程。
 - 通用工具仓提供脱敏套件模板和合成语料单测；真实查询套件仍由私有 `team-agent-knowledge/evaluation/` 保存并人工审核。
