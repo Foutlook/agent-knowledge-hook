@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import {
   calculateEvaluationMetrics,
@@ -15,6 +18,15 @@ import {
   createTempRoot,
   writeExternalKnowledgeFile,
 } from './test-helpers.js';
+
+const execFileAsync = promisify(execFile);
+const testDir = path.dirname(fileURLToPath(import.meta.url));
+const evaluationScriptPath = path.resolve(
+  testDir,
+  '..',
+  'scripts',
+  'evaluate-retrieval.js',
+);
 
 function createSuite(query = {}) {
   return {
@@ -380,4 +392,160 @@ test('writeEvaluationReport writes parseable UTF-8 JSON without BOM', async () =
   const bytes = await readFile(reportPath);
   assert.notDeepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
   assert.deepEqual(JSON.parse(bytes.toString('utf8')), report);
+});
+
+async function runEvaluationScript(args) {
+  try {
+    const result = await execFileAsync(process.execPath, [evaluationScriptPath, ...args]);
+    return { code: 0, ...result };
+  } catch (error) {
+    return {
+      code: error.code,
+      stdout: error.stdout ?? '',
+      stderr: error.stderr ?? '',
+    };
+  }
+}
+
+test('evaluation script rejects missing, unknown, duplicate, and valueless options', async () => {
+  const { knowledgeRoot, suitePath } = await createEvaluationFixture();
+  const outputPath = path.join(knowledgeRoot, 'invalid-output.json');
+  const invalidCases = [
+    { args: ['--knowledge-root', knowledgeRoot], message: /用法/ },
+    { args: ['--suite', suitePath], message: /用法/ },
+    {
+      args: ['--suite', suitePath, '--knowledge-root', knowledgeRoot, '--unknown', 'x'],
+      message: /未知评测参数.*--unknown/,
+    },
+    {
+      args: ['--suite', suitePath, '--suite', suitePath, '--knowledge-root', knowledgeRoot],
+      message: /评测参数不能重复.*--suite/,
+    },
+    {
+      args: ['--suite', suitePath, '--knowledge-root'],
+      message: /评测参数缺少值.*--knowledge-root/,
+    },
+  ];
+
+  for (const invalidCase of invalidCases) {
+    await writeFile(outputPath, 'sentinel', 'utf8');
+    const result = await runEvaluationScript([...invalidCase.args, '--output', outputPath]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, invalidCase.message);
+    assert.equal(await readFile(outputPath, 'utf8'), 'sentinel');
+  }
+});
+
+test('evaluation script writes a parseable UTF-8 report', async () => {
+  const { knowledgeRoot, suitePath } = await createEvaluationFixture();
+  const outputPath = path.join(knowledgeRoot, 'report.json');
+
+  const result = await runEvaluationScript([
+    '--suite', suitePath,
+    '--knowledge-root', knowledgeRoot,
+    '--output', outputPath,
+  ]);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /评测套件：fixture/);
+  assert.match(result.stdout, /报告：/);
+  const bytes = await readFile(outputPath);
+  assert.notDeepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+  assert.equal(JSON.parse(bytes.toString('utf8')).suiteName, 'fixture');
+});
+
+test('evaluation script returns zero for a compatible non-regressing baseline', async () => {
+  const { knowledgeRoot, suitePath } = await createEvaluationFixture();
+  const baselinePath = path.join(knowledgeRoot, 'baseline.json');
+  const candidatePath = path.join(knowledgeRoot, 'candidate.json');
+  const firstRun = await runEvaluationScript([
+    '--suite', suitePath,
+    '--knowledge-root', knowledgeRoot,
+    '--output', baselinePath,
+  ]);
+  assert.equal(firstRun.code, 0, firstRun.stderr);
+
+  const result = await runEvaluationScript([
+    '--suite', suitePath,
+    '--knowledge-root', knowledgeRoot,
+    '--baseline', baselinePath,
+    '--output', candidatePath,
+  ]);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /基线比较：通过/);
+  assert.equal(JSON.parse(await readFile(candidatePath, 'utf8')).comparison.passed, true);
+});
+
+test('evaluation script returns two and writes details for a compatible regression', async () => {
+  const { knowledgeRoot, suitePath } = await createEvaluationFixture();
+  await writeFile(suitePath, JSON.stringify({
+    version: 1,
+    name: 'regression fixture',
+    queries: [{
+      id: 'alpha',
+      category: 'exact-symbol',
+      query: 'alpha',
+      required: ['knowledge/b.md'],
+      related: ['knowledge/a.md'],
+    }],
+  }), 'utf8');
+  const firstPath = path.join(knowledgeRoot, 'first.json');
+  const baselinePath = path.join(knowledgeRoot, 'baseline.json');
+  const candidatePath = path.join(knowledgeRoot, 'candidate.json');
+  const firstRun = await runEvaluationScript([
+    '--suite', suitePath,
+    '--knowledge-root', knowledgeRoot,
+    '--output', firstPath,
+  ]);
+  assert.equal(firstRun.code, 0, firstRun.stderr);
+  const baseline = JSON.parse(await readFile(firstPath, 'utf8'));
+  baseline.metrics = {
+    ...baseline.metrics,
+    mustReadPrecision: 1,
+    requiredRecallAt5: 1,
+    falseMustReadCount: 0,
+    top1HitRate: 1,
+  };
+  await writeFile(baselinePath, JSON.stringify(baseline), 'utf8');
+
+  const result = await runEvaluationScript([
+    '--suite', suitePath,
+    '--knowledge-root', knowledgeRoot,
+    '--baseline', baselinePath,
+    '--output', candidatePath,
+  ]);
+
+  assert.equal(result.code, 2, result.stderr);
+  assert.match(result.stdout, /基线比较：退化/);
+  const candidate = JSON.parse(await readFile(candidatePath, 'utf8'));
+  assert.equal(candidate.comparison.passed, false);
+  assert.ok(candidate.comparison.regressions.length > 0);
+});
+
+test('evaluation script rejects an incompatible baseline without replacing output', async () => {
+  const { knowledgeRoot, suitePath } = await createEvaluationFixture();
+  const baselinePath = path.join(knowledgeRoot, 'baseline.json');
+  const outputPath = path.join(knowledgeRoot, 'candidate.json');
+  const firstRun = await runEvaluationScript([
+    '--suite', suitePath,
+    '--knowledge-root', knowledgeRoot,
+    '--output', baselinePath,
+  ]);
+  assert.equal(firstRun.code, 0, firstRun.stderr);
+  const baseline = JSON.parse(await readFile(baselinePath, 'utf8'));
+  baseline.knowledgeFingerprint = '0'.repeat(64);
+  await writeFile(baselinePath, JSON.stringify(baseline), 'utf8');
+  await writeFile(outputPath, 'sentinel', 'utf8');
+
+  const result = await runEvaluationScript([
+    '--suite', suitePath,
+    '--knowledge-root', knowledgeRoot,
+    '--baseline', baselinePath,
+    '--output', outputPath,
+  ]);
+
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /无法比较评测报告/);
+  assert.equal(await readFile(outputPath, 'utf8'), 'sentinel');
 });

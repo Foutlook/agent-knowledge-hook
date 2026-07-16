@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "name": "example-retrieval-suite",
+  "queries": [
+    {
+      "id": "graph-owner-empty",
+      "category": "mixed-language",
+      "query": "queryGraph ownerId 为空",
+      "required": [
+        "knowledge/domain/example-graph.md"
+      ],
+      "related": [
+        "knowledge/service-map/example-projects.md"
+      ]
+    },
+    {
+      "id": "negative-weather",
+      "category": "negative",
+      "query": "明天的天气",
+      "required": [],
+      "related": []
+    }
+  ]
+}

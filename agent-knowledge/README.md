@@ -141,6 +141,23 @@ agent-knowledge search "实体图谱 实体归属"
 
 `search` 适合临时查找某个关键词、服务关系、历史坑或项目说明。它只输出匹配文件和摘要，不写文件。
 
+### 评测检索效果
+
+使用私有评测套件生成当前报告：
+
+```powershell
+npm run eval:retrieval -- `
+  --suite C:\idea_workspace_tob\team-agent-knowledge\evaluation\retrieval-suite.json `
+  --knowledge-root C:\idea_workspace_tob\team-agent-knowledge `
+  --output C:\idea_workspace_tob\team-agent-knowledge\evaluation\baselines\current.json
+```
+
+比较候选实现时增加 `--baseline <基线JSON>`，并把 `--output` 指向新的候选报告。基线和候选运行之间必须保持评测套件字节及知识库 Markdown 字节不变；工具会用套件哈希和知识正文指纹拒绝不可归因的比较。
+
+首期评测只看四项指标：必读精确率、Required Recall@5、错误必读数和 Top 1 命中率。Required Recall@5 只统计最多五项 `mustRead` 结果；任何未标为 `required` 的 `mustRead` 都算错误必读，`related` 也不例外。
+
+退出码 `0` 表示运行成功或比较通过，`1` 表示输入无效或报告不兼容，`2` 表示可比较但至少一项指标退化。真实查询、标签和报告只应保存在私有知识仓库中；公开模板见 `templates/retrieval-suite.json`。该脚本只评测当前检索器，不修改知识正文或检索行为。
+
 ### add-rule
 
 补充一条团队规则草稿：
